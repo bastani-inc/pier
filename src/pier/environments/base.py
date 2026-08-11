@@ -23,7 +23,12 @@ from pier.environments.resource_policies import (
 )
 from pier.models.agent.install import AgentInstallSpec
 from pier.models.agent.network import NetworkAllowlist
-from pier.models.task.config import EnvironmentConfig, HealthcheckConfig, TaskOS
+from pier.models.task.config import (
+    MAIN_SERVICE_NAME,
+    EnvironmentConfig,
+    HealthcheckConfig,
+    TaskOS,
+)
 from pier.models.trial.config import ResourceMode
 from pier.models.trial.paths import EnvironmentPaths, TrialPaths
 from pier.utils.env import resolve_env_vars
@@ -34,12 +39,11 @@ EnvironmentPath = str | PurePath
 _TRANSFER_TAR_TEMPLATE = ".hb-transfer-{uuid}.tar.gz"
 _ENV_TRANSFER_TAR_DIR = PurePosixPath("/tmp")
 
-# Runtime fallbacks for [environment] resources left unset (None) in
-# task.toml. These were the schema defaults before pier tracked Harbor 0.21
-# (which leaves both unset); applying them here keeps an unset value
+# Runtime fallback for [environment].storage_mb left unset (None) in
+# task.toml. This was the schema default before pier tracked Harbor 0.21
+# (which leaves it unset); applying it here keeps an unset value
 # provisioning exactly what it did before.
 DEFAULT_STORAGE_MB = 10240
-DEFAULT_GPUS = 0
 
 
 class HealthcheckError(RuntimeError):
@@ -249,8 +253,7 @@ class BaseEnvironment(ABC):
 
     @property
     def _effective_gpus(self) -> int:
-        gpus = self.task_env_config.gpus
-        return gpus if gpus is not None else DEFAULT_GPUS
+        return self.task_env_config.gpus or 0
 
     def _validate_resource_mode_support(self) -> None:
         resource_capabilities = type(self).resource_capabilities()
@@ -635,8 +638,14 @@ class BaseEnvironment(ABC):
         source_dir: str,
         target_dir: Path | str,
         exclude: list[str],
+        service: str | None = None,
     ) -> None:
-        """Download a directory through a temporary tar archive with excludes."""
+        """Download a directory through a temporary tar archive with excludes.
+
+        Generic over ``service_exec`` and ``service_download_file``, so it
+        needs no per-service override: any provider that reaches a sidecar
+        through those two primitives gets exclusions for free.
+        """
         target = Path(target_dir)
         target.mkdir(parents=True, exist_ok=True)
 
@@ -647,8 +656,9 @@ class BaseEnvironment(ABC):
         env_tar_path = str(_ENV_TRANSFER_TAR_DIR / env_tar_filename)
         source_path = shlex.quote(source_dir)
 
-        result = await self.exec(
+        result = await self.service_exec(
             f"tar czf {shlex.quote(env_tar_path)} {exclude_flags} -C {source_path} .",
+            service=service,
             timeout_sec=120,
             user="root",
         )
@@ -661,16 +671,18 @@ class BaseEnvironment(ABC):
 
         with tempfile.TemporaryDirectory() as host_tmp_dir:
             host_tar_path = Path(host_tmp_dir) / env_tar_filename
-            await self.download_file(
+            await self.service_download_file(
                 source_path=env_tar_path,
                 target_path=host_tar_path,
+                service=service,
             )
 
             with tarfile.open(host_tar_path, "r:gz") as tf:
                 tf.extractall(path=target, filter="data")
 
-        cleanup_result = await self.exec(
+        cleanup_result = await self.service_exec(
             f"rm -f {shlex.quote(env_tar_path)}",
+            service=service,
             timeout_sec=120,
             user="root",
         )
@@ -680,6 +692,90 @@ class BaseEnvironment(ABC):
                 "Failed to remove transfer archive "
                 f"{env_tar_path!r} with code {cleanup_result.return_code}: {output}"
             )
+
+    # ------------------------------------------------------------------
+    # Per-service (docker compose) operations
+    #
+    # ``service=None`` (or the main service name) routes to the regular
+    # main-container operations, so these are safe to call on any provider.
+    # Reaching a sidecar service needs a compose-capable provider that
+    # overrides them; the base implementations raise ``NotImplementedError``,
+    # which artifact collection records as a failed manifest entry instead of
+    # failing the trial.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def is_main_service(service: str | None) -> bool:
+        """True when *service* refers to the main (agent) compose service."""
+        return service is None or service == MAIN_SERVICE_NAME
+
+    def _service_unsupported(self, service: str | None) -> NotImplementedError:
+        return NotImplementedError(
+            f"{self.type()} environment cannot operate on compose service "
+            f"{service!r}: sidecar artifact collection needs a compose-capable "
+            "provider."
+        )
+
+    async def service_exec(
+        self,
+        command: str,
+        *,
+        service: str | None = None,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+        user: str | int | None = None,
+    ) -> ExecResult:
+        """Execute a command in a specific compose service (default: main)."""
+        if self.is_main_service(service):
+            return await self.exec(
+                command, cwd=cwd, env=env, timeout_sec=timeout_sec, user=user
+            )
+        raise self._service_unsupported(service)
+
+    async def service_download_file(
+        self,
+        source_path: str,
+        target_path: Path | str,
+        *,
+        service: str | None = None,
+    ) -> None:
+        """Download a file from a specific compose service (default: main)."""
+        if self.is_main_service(service):
+            await self.download_file(source_path, target_path)
+            return
+        raise self._service_unsupported(service)
+
+    async def service_download_dir(
+        self,
+        source_dir: str,
+        target_dir: Path | str,
+        *,
+        service: str | None = None,
+    ) -> None:
+        """Download a directory from a compose service (default: main)."""
+        if self.is_main_service(service):
+            await self.download_dir(source_dir, target_dir)
+            return
+        raise self._service_unsupported(service)
+
+    async def service_is_dir(
+        self,
+        path: str,
+        *,
+        service: str | None = None,
+        user: str | int | None = None,
+    ) -> bool:
+        """Check whether a path inside a compose service is a directory."""
+        if self.is_main_service(service):
+            return await self.is_dir(path, user=user)
+        result = await self.service_exec(
+            self._path_kind_check_command(path, require_dir=True),
+            service=service,
+            timeout_sec=10,
+            user=user,
+        )
+        return result.return_code == 0
 
     @abstractmethod
     async def exec(

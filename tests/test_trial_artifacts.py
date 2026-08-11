@@ -34,12 +34,20 @@ def _handler(
     )
 
 
+def _mock_env(*, mounted: bool, is_dir: bool = False) -> AsyncMock:
+    """A stub environment that supports service-scoped collection."""
+    environment = AsyncMock()
+    environment.capabilities.mounted = mounted
+    environment.service_is_dir = AsyncMock(return_value=is_dir)
+    environment.service_download_file = AsyncMock()
+    environment.service_download_dir = AsyncMock()
+    environment.download_dir_with_exclusions = AsyncMock()
+    return environment
+
+
 @run_async
 async def test_downloads_configured_file_to_destination(tmp_path: Path) -> None:
-    environment = AsyncMock()
-    environment.capabilities.mounted = True
-    environment.is_dir = AsyncMock(return_value=False)
-    environment.download_file = AsyncMock()
+    environment = _mock_env(mounted=True)
     handler = _handler(
         [
             ArtifactConfig(
@@ -57,9 +65,10 @@ async def test_downloads_configured_file_to_destination(tmp_path: Path) -> None:
         source_artifacts_dir=ENV_ARTIFACTS_DIR,
     )
 
-    environment.download_file.assert_awaited_once_with(
+    environment.service_download_file.assert_awaited_once_with(
         source_path="/tmp/answer.json",
         target_path=artifacts_dir / "answers" / "final.json",
+        service=None,
     )
     assert manifest.entries[1].source == "/tmp/answer.json"
     assert manifest.entries[1].destination == "artifacts/answers/final.json"
@@ -69,11 +78,7 @@ async def test_downloads_configured_file_to_destination(tmp_path: Path) -> None:
 
 @run_async
 async def test_downloads_configured_directory_with_exclude(tmp_path: Path) -> None:
-    environment = AsyncMock()
-    environment.capabilities.mounted = True
-    environment.is_dir = AsyncMock(return_value=True)
-    environment.download_dir = AsyncMock()
-    environment.download_dir_with_exclusions = AsyncMock()
+    environment = _mock_env(mounted=True, is_dir=True)
     handler = _handler(
         [
             ArtifactConfig(
@@ -91,11 +96,12 @@ async def test_downloads_configured_directory_with_exclude(tmp_path: Path) -> No
         source_artifacts_dir=ENV_ARTIFACTS_DIR,
     )
 
-    environment.download_dir.assert_not_awaited()
+    environment.service_download_dir.assert_not_awaited()
     environment.download_dir_with_exclusions.assert_awaited_once_with(
         source_dir="/app/my dir",
         target_dir=artifacts_dir / "my dir",
         exclude=["*.pyc", "helper files", "$(touch hacked)"],
+        service=None,
     )
 
 
@@ -103,10 +109,7 @@ async def test_downloads_configured_directory_with_exclude(tmp_path: Path) -> No
 async def test_implicit_artifacts_dir_downloads_to_artifacts_root(
     tmp_path: Path,
 ) -> None:
-    environment = AsyncMock()
-    environment.capabilities.mounted = False
-    environment.is_dir = AsyncMock(return_value=True)
-    environment.download_dir = AsyncMock()
+    environment = _mock_env(mounted=False, is_dir=True)
     handler = _handler([])
 
     artifacts_dir = tmp_path / "artifacts"
@@ -117,9 +120,10 @@ async def test_implicit_artifacts_dir_downloads_to_artifacts_root(
         source_artifacts_dir=ENV_ARTIFACTS_DIR,
     )
 
-    environment.download_dir.assert_awaited_once_with(
+    environment.service_download_dir.assert_awaited_once_with(
         source_dir="/logs/artifacts",
         target_dir=artifacts_dir,
+        service=None,
     )
     assert manifest.entries[0].source == "/logs/artifacts"
     assert manifest.entries[0].destination == "artifacts"
@@ -132,11 +136,7 @@ async def test_implicit_artifacts_dir_downloads_to_artifacts_root(
 async def test_explicit_artifacts_dir_with_exclude_uses_artifacts_root(
     tmp_path: Path,
 ) -> None:
-    environment = AsyncMock()
-    environment.capabilities.mounted = False
-    environment.is_dir = AsyncMock(return_value=True)
-    environment.download_dir = AsyncMock()
-    environment.download_dir_with_exclusions = AsyncMock()
+    environment = _mock_env(mounted=False, is_dir=True)
     handler = _handler(
         [ArtifactConfig(source="/logs/artifacts", exclude=["*.pt"])],
     )
@@ -149,11 +149,12 @@ async def test_explicit_artifacts_dir_with_exclude_uses_artifacts_root(
         source_artifacts_dir=ENV_ARTIFACTS_DIR,
     )
 
-    environment.download_dir.assert_not_awaited()
+    environment.service_download_dir.assert_not_awaited()
     environment.download_dir_with_exclusions.assert_awaited_once_with(
         source_dir="/logs/artifacts",
         target_dir=artifacts_dir,
         exclude=["*.pt"],
+        service=None,
     )
 
 
@@ -301,44 +302,99 @@ async def test_uploads_implicit_artifacts_dir_to_target_convention(
 
 
 @run_async
-async def test_sidecar_service_artifact_skipped_with_warning(
-    tmp_path: Path,
-    caplog,
-) -> None:
-    """Artifacts targeting a non-main service are skipped loudly, not collected."""
-    environment = AsyncMock()
-    environment.capabilities.mounted = True
-    environment.is_dir = AsyncMock(return_value=False)
-    environment.download_file = AsyncMock()
-    environment.download_dir = AsyncMock()
+async def test_sidecar_service_file_is_collected(tmp_path: Path) -> None:
+    """A sidecar entry is collected from its own service, not from main."""
+    environment = _mock_env(mounted=True)
     handler = _handler(
         [ArtifactConfig(source="/var/db/dump.sql", service="db")],
     )
 
     artifacts_dir = tmp_path / "artifacts"
 
-    with caplog.at_level(logging.WARNING):
-        manifest = await handler.download_artifacts(
-            environment,
-            artifacts_dir,
-            source_artifacts_dir=ENV_ARTIFACTS_DIR,
-        )
-
-    environment.download_file.assert_not_awaited()
-    environment.download_dir.assert_not_awaited()
-    assert all(entry.source != "/var/db/dump.sql" for entry in manifest.entries)
-    assert any(
-        "unsupported service 'db'" in record.message for record in caplog.records
+    manifest = await handler.download_artifacts(
+        environment,
+        artifacts_dir,
+        source_artifacts_dir=ENV_ARTIFACTS_DIR,
     )
+
+    environment.service_download_file.assert_awaited_once_with(
+        source_path="/var/db/dump.sql",
+        target_path=artifacts_dir / "dump.sql",
+        service="db",
+    )
+    entry = manifest.entries[1]
+    assert entry.source == "/var/db/dump.sql"
+    assert entry.service == "db"
+    assert entry.status == "ok"
+
+
+@run_async
+async def test_sidecar_directory_with_exclude_is_collected(tmp_path: Path) -> None:
+    """Exclusions reach the sidecar through the service-scoped tar path."""
+    environment = _mock_env(mounted=True, is_dir=True)
+    handler = _handler(
+        [ArtifactConfig(source="/var/lib/db", service="db", exclude=["*.wal"])],
+    )
+
+    artifacts_dir = tmp_path / "artifacts"
+
+    await handler.download_artifacts(
+        environment,
+        artifacts_dir,
+        source_artifacts_dir=ENV_ARTIFACTS_DIR,
+    )
+
+    environment.service_download_dir.assert_not_awaited()
+    environment.download_dir_with_exclusions.assert_awaited_once_with(
+        source_dir="/var/lib/db",
+        target_dir=artifacts_dir / "db",
+        exclude=["*.wal"],
+        service="db",
+    )
+
+
+@run_async
+async def test_sidecar_collection_on_unsupported_env_records_failure(
+    tmp_path: Path,
+) -> None:
+    """Backends without per-service ops degrade to a failed manifest entry."""
+
+    class _MainOnlyEnvironment(AsyncMock):
+        async def service_is_dir(self, path, *, service=None, user=None):
+            if service is not None:
+                raise NotImplementedError(service)
+            return False
+
+        async def service_download_file(
+            self, source_path, target_path, *, service=None
+        ):
+            if service is not None:
+                raise NotImplementedError(service)
+
+    environment = _MainOnlyEnvironment()
+    environment.capabilities.mounted = True
+    handler = _handler(
+        [ArtifactConfig(source="/var/db/dump.sql", service="db")],
+    )
+
+    artifacts_dir = tmp_path / "artifacts"
+
+    manifest = await handler.download_artifacts(
+        environment,
+        artifacts_dir,
+        source_artifacts_dir=ENV_ARTIFACTS_DIR,
+    )
+
+    entry = manifest.entries[1]
+    assert entry.source == "/var/db/dump.sql"
+    assert entry.service == "db"
+    assert entry.status == "failed"
 
 
 @run_async
 async def test_main_service_artifact_still_collected(tmp_path: Path) -> None:
     """An explicit service='main' entry collects exactly like service=None."""
-    environment = AsyncMock()
-    environment.capabilities.mounted = True
-    environment.is_dir = AsyncMock(return_value=False)
-    environment.download_file = AsyncMock()
+    environment = _mock_env(mounted=True)
     handler = _handler(
         [
             ArtifactConfig(
@@ -357,9 +413,36 @@ async def test_main_service_artifact_still_collected(tmp_path: Path) -> None:
         source_artifacts_dir=ENV_ARTIFACTS_DIR,
     )
 
-    environment.download_file.assert_awaited_once_with(
+    environment.service_download_file.assert_awaited_once_with(
         source_path="/tmp/answer.json",
         target_path=artifacts_dir / "answers" / "final.json",
+        service="main",
+    )
+
+
+@run_async
+async def test_sidecar_entry_on_convention_dir_keeps_implicit_main_entry(
+    tmp_path: Path,
+) -> None:
+    """A sidecar entry on the convention dir must not suppress the main one.
+
+    Both entries share a source, so a service-blind lookup would treat the
+    sidecar entry as the convention entry and never collect the agent's own
+    publish directory.
+    """
+    environment = AsyncMock()
+    environment.capabilities.mounted = False
+    environment.is_dir = AsyncMock(return_value=True)
+    environment.download_dir = AsyncMock()
+    handler = _handler(
+        [ArtifactConfig(source=ENV_ARTIFACTS_DIR.as_posix(), service="db")],
+    )
+
+    normalized = handler._normalized_artifacts(None, ENV_ARTIFACTS_DIR.as_posix())
+
+    assert [artifact.service for artifact in normalized] == [None, "db"]
+    assert all(
+        artifact.source == ENV_ARTIFACTS_DIR.as_posix() for artifact in normalized
     )
 
 

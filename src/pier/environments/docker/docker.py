@@ -31,8 +31,9 @@ from pier.environments.docker import (
     write_mounts_compose_file,
     write_resources_compose_file,
 )
+from pier.environments.docker.docker_unix import UnixOps
 from pier.models.environment_type import EnvironmentType
-from pier.models.task.config import EnvironmentConfig, TaskOS
+from pier.models.task.config import MAIN_SERVICE_NAME, EnvironmentConfig, TaskOS
 from pier.models.trial.config import ResourceMode, ServiceVolumeConfig
 from pier.models.trial.paths import EnvironmentPaths, TrialPaths
 from pier.utils.env import resolve_env_vars
@@ -188,8 +189,6 @@ class DockerEnvironment(BaseEnvironment):
             self._windows_container_name = f"pier-{uuid.uuid4().hex[:12]}"
             self._platform = WindowsOps(self, self._windows_container_name)
         else:
-            from pier.environments.docker.docker_unix import UnixOps
-
             self._windows_container_name: str | None = None
             self._platform = UnixOps(self)
 
@@ -713,7 +712,12 @@ class DockerEnvironment(BaseEnvironment):
     async def upload_dir(self, source_dir: Path | str, target_dir: str):
         await self._platform.upload_dir(source_dir, target_dir)
 
-    async def _chown_to_host_user(self, path: str, recursive: bool = False) -> None:
+    async def _chown_to_host_user(
+        self,
+        path: str,
+        recursive: bool = False,
+        service: str | None = None,
+    ) -> None:
         """Best-effort chown of a container path to the host user's UID:GID.
 
         No-op on Windows (where os.getuid/os.getgid are unavailable).
@@ -721,8 +725,10 @@ class DockerEnvironment(BaseEnvironment):
         if not hasattr(os, "getuid"):
             return
         flag = "-R " if recursive else ""
-        await self.exec(
-            f"chown {flag}{os.getuid()}:{os.getgid()} {shlex.quote(path)}", user="root"
+        await self.service_exec(
+            f"chown {flag}{os.getuid()}:{os.getgid()} {shlex.quote(path)}",
+            service=service,
+            user="root",
         )
 
     async def download_file(self, source_path: str, target_path: Path | str):
@@ -730,6 +736,43 @@ class DockerEnvironment(BaseEnvironment):
 
     async def download_dir(self, source_dir: str, target_dir: Path | str):
         await self._platform.download_dir(source_dir, target_dir)
+
+    def _require_unix_sidecar(self, service: str | None) -> UnixOps:
+        """Platform ops for sidecar transfers; Linux containers only."""
+        if not isinstance(self._platform, UnixOps):
+            raise NotImplementedError(
+                "Per-service operations are not supported for Windows "
+                f"containers (requested service: {service!r})."
+            )
+        return self._platform
+
+    async def service_download_file(
+        self,
+        source_path: str,
+        target_path: Path | str,
+        *,
+        service: str | None = None,
+    ) -> None:
+        if self.is_main_service(service):
+            await self.download_file(source_path, target_path)
+            return
+        await self._require_unix_sidecar(service).download_file(
+            source_path, target_path, service=service
+        )
+
+    async def service_download_dir(
+        self,
+        source_dir: str,
+        target_dir: Path | str,
+        *,
+        service: str | None = None,
+    ) -> None:
+        if self.is_main_service(service):
+            await self.download_dir(source_dir, target_dir)
+            return
+        await self._require_unix_sidecar(service).download_dir(
+            source_dir, target_dir, service=service
+        )
 
     async def exec(
         self,
@@ -739,14 +782,55 @@ class DockerEnvironment(BaseEnvironment):
         timeout_sec: int | None = None,
         user: str | int | None = None,
     ) -> ExecResult:
-        user = self._resolve_user(user)
-        env = self._merge_env(env)
+        return await self._compose_exec(
+            command,
+            service=MAIN_SERVICE_NAME,
+            cwd=cwd or self.task_env_config.workdir,
+            env=self._merge_env(env),
+            timeout_sec=timeout_sec,
+            user=self._resolve_user(user),
+        )
 
+    async def service_exec(
+        self,
+        command: str,
+        *,
+        service: str | None = None,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+        user: str | int | None = None,
+    ) -> ExecResult:
+        if self.is_main_service(service):
+            return await self.exec(
+                command, cwd=cwd, env=env, timeout_sec=timeout_sec, user=user
+            )
+        self._require_unix_sidecar(service)
+        # Sidecar execs deliberately do not inherit the main container's
+        # workdir, default user, or persistent env: those are main-specific.
+        return await self._compose_exec(
+            command,
+            service=service,
+            cwd=cwd,
+            env=env,
+            timeout_sec=timeout_sec,
+            user=user,
+        )
+
+    async def _compose_exec(
+        self,
+        command: str,
+        *,
+        service: str,
+        cwd: str | None,
+        env: dict[str, str] | None,
+        timeout_sec: int | None,
+        user: str | int | None,
+    ) -> ExecResult:
         exec_command = ["exec"]
 
-        effective_cwd = cwd or self.task_env_config.workdir
-        if effective_cwd:
-            exec_command.extend(["-w", effective_cwd])
+        if cwd:
+            exec_command.extend(["-w", cwd])
 
         if env:
             for key, value in env.items():
@@ -755,8 +839,18 @@ class DockerEnvironment(BaseEnvironment):
         if user is not None:
             exec_command.extend(["-u", str(user)])
 
-        exec_command.append("main")
-        exec_command.extend(self._platform.exec_shell_args(command))
+        exec_command.append(service)
+        if service == MAIN_SERVICE_NAME:
+            # The main container is a pier-built image that always ships bash,
+            # and tasks rely on bash semantics, so keep the platform wrapper
+            # (bash on Unix, cmd on Windows).
+            exec_command.extend(self._platform.exec_shell_args(command))
+        else:
+            # Sidecars are arbitrary third-party images (Unix only; Windows
+            # sidecar ops are rejected in _require_unix_sidecar). bash is often
+            # absent from minimal images such as the *-alpine variants,
+            # whereas POSIX sh is universal.
+            exec_command.extend(["sh", "-c", command])
 
         return await self._run_docker_compose_command(
             exec_command, check=False, timeout_sec=timeout_sec

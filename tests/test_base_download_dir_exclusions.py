@@ -142,3 +142,40 @@ async def test_unique_transfer_archive(tmp_path: Path) -> None:
         archive_name = Path(archive_path).name
         uuid_text = archive_name.removeprefix(".hb-transfer-").removesuffix(".tar.gz")
         UUID(uuid_text)
+
+
+@run_async
+async def test_service_operations_default_to_the_main_container(
+    tmp_path: Path,
+) -> None:
+    """service=None routes to the plain main-container operations."""
+    env = _make_environment(tmp_path, ExecResult(return_code=0, stdout="", stderr=""))
+
+    await env.service_exec("true")
+    await env.service_download_file("/tmp/x", tmp_path / "x")
+
+    assert env.exec_commands == ["true"]
+    assert env.download_source_paths == ["/tmp/x"]
+
+
+@run_async
+async def test_sidecar_operations_are_unsupported_by_default(tmp_path: Path) -> None:
+    """Backends without compose sidecars signal it instead of hitting main."""
+    env = _make_environment(tmp_path, ExecResult(return_code=0, stdout="", stderr=""))
+
+    with pytest.raises(NotImplementedError, match="db"):
+        await env.service_exec("true", service="db")
+    with pytest.raises(NotImplementedError, match="db"):
+        await env.service_download_file("/tmp/x", tmp_path / "x", service="db")
+    with pytest.raises(NotImplementedError, match="db"):
+        await env.service_download_dir("/tmp/d", tmp_path / "d", service="db")
+    with pytest.raises(NotImplementedError, match="db"):
+        await env.download_dir_with_exclusions(
+            source_dir="/tmp/d",
+            target_dir=tmp_path / "d",
+            exclude=["*.tmp"],
+            service="db",
+        )
+
+    assert env.exec_commands == []
+    assert env.download_called is False

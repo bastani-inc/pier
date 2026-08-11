@@ -88,7 +88,7 @@ def _make_env(mounted: bool) -> AsyncMock:
         target.mkdir(parents=True, exist_ok=True)
         (target / "artifact.txt").write_text(source_dir)
 
-    async def download_dir_with_exclusions(source_dir, target_dir, *, exclude):
+    async def download_dir_with_exclusions(source_dir, target_dir, *, exclude, service):
         await download_dir(source_dir, target_dir)
 
     async def download_file(source_path, target_path):
@@ -96,9 +96,23 @@ def _make_env(mounted: bool) -> AsyncMock:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(source_path)
 
+    # Route the service-scoped API to the main-container one, exactly as
+    # BaseEnvironment does for service=None.
+    async def service_is_dir(path, *, service=None, user=None):
+        return await env.is_dir(path, user=user)
+
+    async def service_download_dir(source_dir, target_dir, *, service=None):
+        await env.download_dir(source_dir=source_dir, target_dir=target_dir)
+
+    async def service_download_file(source_path, target_path, *, service=None):
+        await env.download_file(source_path=source_path, target_path=target_path)
+
     env.download_dir.side_effect = download_dir
     env.download_dir_with_exclusions.side_effect = download_dir_with_exclusions
     env.download_file.side_effect = download_file
+    env.service_is_dir.side_effect = service_is_dir
+    env.service_download_dir.side_effect = service_download_dir
+    env.service_download_file.side_effect = service_download_file
     return env
 
 
@@ -304,6 +318,7 @@ class TestVerifierArtifactUpload:
                 source_dir="/logs/artifacts",
                 target_dir=trial._trial_paths.artifacts_dir,
                 exclude=["*.pt", "cache"],
+                service=None,
             )
             verifier_env.upload_dir.assert_awaited_once_with(
                 source_dir=trial._trial_paths.artifacts_dir,

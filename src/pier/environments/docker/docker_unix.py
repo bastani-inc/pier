@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pier.models.task.config import MAIN_SERVICE_NAME
+
 if TYPE_CHECKING:
     from pier.environments.docker.docker import DockerEnvironment
 
@@ -43,17 +45,29 @@ class UnixOps:
                 check=False,
             )
 
-    async def download_file(self, source_path: str, target_path: Path | str) -> None:
-        await self._env._chown_to_host_user(source_path)
+    async def download_file(
+        self,
+        source_path: str,
+        target_path: Path | str,
+        service: str | None = None,
+    ) -> None:
+        service = service or MAIN_SERVICE_NAME
+        await self._env._chown_to_host_user(source_path, service=service)
         await self._env._run_docker_compose_command(
-            ["cp", f"main:{source_path}", str(target_path)],
+            ["cp", f"{service}:{source_path}", str(target_path)],
             check=True,
         )
 
-    async def download_dir(self, source_dir: str, target_dir: Path | str) -> None:
-        await self._env._chown_to_host_user(source_dir, recursive=True)
+    async def download_dir(
+        self,
+        source_dir: str,
+        target_dir: Path | str,
+        service: str | None = None,
+    ) -> None:
+        service = service or MAIN_SERVICE_NAME
+        await self._env._chown_to_host_user(source_dir, recursive=True, service=service)
         await self._env._run_docker_compose_command(
-            ["cp", f"main:{source_dir}/.", str(target_dir)],
+            ["cp", f"{service}:{source_dir}/.", str(target_dir)],
             check=True,
         )
 

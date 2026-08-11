@@ -7,9 +7,13 @@ task.toml), the step level (``[[steps]].artifacts``), and the trial level
 single collection pass operates on. These helpers validate a collection set;
 pier keeps its own host-path mapping in ``pier.trial.artifact_handler``, so
 harbor's ``source_relative_path`` is not vendored.
+
+Harbor's ``validate_artifact_entries`` also re-checks that a sidecar entry's
+source is absolute. Pier does not: ``ArtifactConfig`` enforces that in its own
+model validator, so every constructed instance already satisfies it and
+string-form entries normalize to ``service=None``.
 """
 
-import re
 import warnings
 from collections.abc import Sequence
 from itertools import combinations
@@ -17,17 +21,10 @@ from pathlib import PurePosixPath
 
 from pier.models.task.config import MAIN_SERVICE_NAME, ArtifactConfig, TaskOS
 
-_WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:[/\\]")
-
 
 def effective_artifact_service(artifact: ArtifactConfig) -> str:
     """The compose service an artifact entry targets (defaults to main)."""
     return artifact.service or MAIN_SERVICE_NAME
-
-
-def is_absolute_container_path(path: str) -> bool:
-    """True for POSIX-absolute or Windows drive-prefixed paths."""
-    return path.startswith("/") or _WINDOWS_DRIVE_PATTERN.match(path) is not None
 
 
 def convention_source_for_os(os: TaskOS) -> str:
@@ -89,25 +86,12 @@ def validate_artifact_entries(
 ) -> None:
     """Validate one collection set of artifact entries.
 
-    Raises ``ValueError`` only on a structurally invalid entry:
-
-    - a sidecar entry whose source is not an absolute path
-
     Overlapping sources or destinations do not raise: since all services
     share one flat artifacts base dir, overlapping entries simply collide on
-    the same host path, and collection keeps the first claimant and skips the
-    rest. We surface a load-time warning so the overlap is visible up front.
+    the same host path, and the later entry overwrites the earlier one. We
+    surface a load-time warning so the overlap is visible up front.
     """
     full = with_convention_entry(entries, convention_source=convention_source)
-
-    for artifact in full:
-        if effective_artifact_service(
-            artifact
-        ) != MAIN_SERVICE_NAME and not is_absolute_container_path(artifact.source):
-            raise ValueError(
-                f"Artifact source {artifact.source!r} from service "
-                f"{artifact.service!r} must be an absolute path."
-            )
 
     for first, second in combinations(full, 2):
         if not _paths_overlap(first.source, second.source):

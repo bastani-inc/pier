@@ -488,6 +488,14 @@ class MCPServerConfig(BaseModel):
         return self
 
 
+_WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:[/\\]")
+
+
+def is_absolute_container_path(path: str) -> bool:
+    """True for POSIX-absolute or Windows drive-prefixed paths."""
+    return path.startswith("/") or _WINDOWS_DRIVE_PATTERN.match(path) is not None
+
+
 class ArtifactConfig(BaseModel):
     source: str
     destination: str | None = None
@@ -499,9 +507,8 @@ class ArtifactConfig(BaseModel):
     service: str | None = Field(
         default=None,
         description="Docker Compose service to collect this artifact from. "
-        "None or 'main' targets the agent's container. Pier does not collect "
-        "from sidecar services yet; entries targeting them are skipped with a "
-        "warning at collection time.",
+        "None or 'main' targets the agent's container. Any other value needs "
+        "a compose-capable environment provider and an absolute source path.",
     )
 
     @field_validator("service")
@@ -564,9 +571,7 @@ class ArtifactConfig(BaseModel):
     @model_validator(mode="after")
     def _validate_sidecar_source(self) -> "ArtifactConfig":
         if self.service is not None and self.service != MAIN_SERVICE_NAME:
-            if not (
-                self.source.startswith("/") or re.match(r"^[A-Za-z]:[/\\]", self.source)
-            ):
+            if not is_absolute_container_path(self.source):
                 raise ValueError(
                     f"Artifact source {self.source!r} collected from service "
                     f"{self.service!r} must be an absolute path."

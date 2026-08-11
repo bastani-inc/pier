@@ -14,7 +14,6 @@ import pytest
 from pydantic import ValidationError
 
 from pier.environments.base import (
-    DEFAULT_GPUS,
     DEFAULT_STORAGE_MB,
     BaseEnvironment,
     ExecResult,
@@ -154,7 +153,7 @@ def test_resource_defaults_are_unset():
 def test_unset_resources_fall_back_to_legacy_defaults(tmp_path: Path):
     environment = _make_environment(tmp_path, EnvironmentConfig())
     assert environment._effective_storage_mb == DEFAULT_STORAGE_MB == 10240
-    assert environment._effective_gpus == DEFAULT_GPUS == 0
+    assert environment._effective_gpus == 0
 
 
 def test_explicit_resources_pass_through(tmp_path: Path):

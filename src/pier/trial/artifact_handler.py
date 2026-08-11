@@ -5,12 +5,16 @@ from collections.abc import Sequence
 from pathlib import Path, PurePath, PurePosixPath
 
 from pier.environments.base import BaseEnvironment, EnvironmentPath
-from pier.models.task.config import MAIN_SERVICE_NAME
+from pier.models.task.artifacts import (
+    effective_artifact_service,
+    is_convention_entry,
+    with_convention_entry,
+)
+from pier.models.task.config import ArtifactConfig
 from pier.models.trial.artifact_manifest import (
     ArtifactManifest,
     ArtifactManifestEntry,
 )
-from pier.models.trial.config import ArtifactConfig
 
 
 class ArtifactHandler:
@@ -57,16 +61,6 @@ class ArtifactHandler:
         convention_source = self._environment_path_str(source_artifacts_dir)
 
         for artifact in self._normalized_artifacts(artifacts, convention_source):
-            if artifact.service is not None and artifact.service != MAIN_SERVICE_NAME:
-                # Pier only collects from the agent's container. Skipping
-                # loudly beats collecting from the wrong container; sidecar
-                # collection is a separate upcoming change.
-                self.logger.warning(
-                    f"Skipping artifact '{artifact.source}' targeting "
-                    f"unsupported service '{artifact.service}': pier only "
-                    "collects artifacts from the main service."
-                )
-                continue
             entries.append(
                 await self._download_artifact(
                     source_env=source_env,
@@ -103,7 +97,7 @@ class ArtifactHandler:
                 continue
 
             target_source = self._upload_target_source(
-                artifact.source,
+                artifact,
                 source_convention=source_convention,
                 target_convention=target_convention,
             )
@@ -125,33 +119,9 @@ class ArtifactHandler:
         artifacts: Sequence[str | ArtifactConfig] | None,
         convention_source: str,
     ) -> list[ArtifactConfig]:
-        artifact_values: list[str | ArtifactConfig] = [
-            *self.artifacts,
-            *(artifacts or []),
-        ]
-        normalized = [
-            ArtifactConfig(source=artifact) if isinstance(artifact, str) else artifact
-            for artifact in artifact_values
-        ]
-
-        if not self._has_artifact_source(normalized, convention_source):
-            # No explicit destination: ArtifactConfig now rejects absolute
-            # destinations, and _host_path already maps the convention source
-            # to the artifacts root when destination is unset.
-            normalized.insert(
-                0,
-                ArtifactConfig(source=convention_source),
-            )
-        return normalized
-
-    def _has_artifact_source(
-        self,
-        artifacts: Sequence[ArtifactConfig],
-        source: str,
-    ) -> bool:
-        normalized_source = source.rstrip("/")
-        return any(
-            artifact.source.rstrip("/") == normalized_source for artifact in artifacts
+        return with_convention_entry(
+            [*self.artifacts, *(artifacts or [])],
+            convention_source=convention_source,
         )
 
     async def _download_artifact(
@@ -171,7 +141,8 @@ class ArtifactHandler:
         manifest_destination = self._manifest_destination(artifacts_dir, target)
 
         if (
-            self._is_environment_artifacts_dir(source, convention_source)
+            is_convention_entry(artifact, convention_source)
+            and not artifact.destination
             and source_env.capabilities.mounted
             and not artifact.exclude
         ):
@@ -179,10 +150,13 @@ class ArtifactHandler:
                 source=source,
                 target=target,
                 manifest_destination=manifest_destination,
+                service=artifact.service,
             )
 
         try:
-            is_dir = await source_env.is_dir(source, user="root")
+            is_dir = await source_env.service_is_dir(
+                source, service=artifact.service, user="root"
+            )
         except Exception:
             is_dir = not Path(source).suffix
 
@@ -194,18 +168,21 @@ class ArtifactHandler:
                         source_dir=source,
                         target_dir=target,
                         exclude=artifact.exclude,
+                        service=artifact.service,
                     )
                 else:
-                    await source_env.download_dir(
+                    await source_env.service_download_dir(
                         source_dir=source,
                         target_dir=target,
+                        service=artifact.service,
                     )
                 artifact_type = "directory"
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                await source_env.download_file(
+                await source_env.service_download_file(
                     source_path=source,
                     target_path=target,
+                    service=artifact.service,
                 )
                 artifact_type = "file"
 
@@ -214,10 +191,12 @@ class ArtifactHandler:
                 destination=manifest_destination,
                 type=artifact_type,
                 status="ok",
+                service=artifact.service,
             )
         except Exception:
             self.logger.debug(
-                f"Failed to download artifact '{source}' (best-effort)",
+                f"Failed to download artifact '{source}' from service "
+                f"'{effective_artifact_service(artifact)}' (best-effort)",
                 exc_info=True,
             )
             return ArtifactManifestEntry(
@@ -225,6 +204,7 @@ class ArtifactHandler:
                 destination=manifest_destination,
                 type="directory" if is_dir else "file",
                 status="failed",
+                service=artifact.service,
             )
 
     def _record_mounted_artifacts_dir(
@@ -233,6 +213,7 @@ class ArtifactHandler:
         source: str,
         target: Path,
         manifest_destination: str,
+        service: str | None,
     ) -> ArtifactManifestEntry:
         has_contents = target.exists() and any(target.iterdir())
         return ArtifactManifestEntry(
@@ -240,6 +221,7 @@ class ArtifactHandler:
             destination=manifest_destination,
             type="directory",
             status="ok" if has_contents else "empty",
+            service=service,
         )
 
     def _host_path(
@@ -249,7 +231,7 @@ class ArtifactHandler:
         *,
         convention_source: str,
     ) -> Path:
-        if self._is_environment_artifacts_dir(artifact.source, convention_source):
+        if is_convention_entry(artifact, convention_source):
             destination = artifact.destination or artifact.source
             if (
                 self._is_environment_artifacts_dir(destination, convention_source)
@@ -275,14 +257,14 @@ class ArtifactHandler:
 
     def _upload_target_source(
         self,
-        source: str,
+        artifact: ArtifactConfig,
         *,
         source_convention: str,
         target_convention: str,
     ) -> str:
-        if self._is_environment_artifacts_dir(source, source_convention):
+        if is_convention_entry(artifact, source_convention):
             return target_convention
-        return source
+        return artifact.source
 
     @staticmethod
     def _environment_path_str(path: EnvironmentPath) -> str:
