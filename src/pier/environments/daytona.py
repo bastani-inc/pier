@@ -1003,8 +1003,9 @@ class DaytonaEnvironment(BaseEnvironment):
             kwargs["cpu"] = cpus
         if (memory_mb := self._effective_memory_mb) is not None:
             kwargs["memory"] = memory_mb // 1024
-        if (storage_mb := self._effective_storage_mb) is not None:
-            kwargs["disk"] = storage_mb // 1024
+        # _effective_storage_mb falls back to DEFAULT_STORAGE_MB when the task
+        # leaves storage_mb unset, so disk is always provisioned.
+        kwargs["disk"] = self._effective_storage_mb // 1024
         return Resources(**kwargs) if kwargs else None
 
     async def _pin_resolved_hosts(self) -> None:

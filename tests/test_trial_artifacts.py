@@ -300,6 +300,69 @@ async def test_uploads_implicit_artifacts_dir_to_target_convention(
     )
 
 
+@run_async
+async def test_sidecar_service_artifact_skipped_with_warning(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    """Artifacts targeting a non-main service are skipped loudly, not collected."""
+    environment = AsyncMock()
+    environment.capabilities.mounted = True
+    environment.is_dir = AsyncMock(return_value=False)
+    environment.download_file = AsyncMock()
+    environment.download_dir = AsyncMock()
+    handler = _handler(
+        [ArtifactConfig(source="/var/db/dump.sql", service="db")],
+    )
+
+    artifacts_dir = tmp_path / "artifacts"
+
+    with caplog.at_level(logging.WARNING):
+        manifest = await handler.download_artifacts(
+            environment,
+            artifacts_dir,
+            source_artifacts_dir=ENV_ARTIFACTS_DIR,
+        )
+
+    environment.download_file.assert_not_awaited()
+    environment.download_dir.assert_not_awaited()
+    assert all(entry.source != "/var/db/dump.sql" for entry in manifest.entries)
+    assert any(
+        "unsupported service 'db'" in record.message for record in caplog.records
+    )
+
+
+@run_async
+async def test_main_service_artifact_still_collected(tmp_path: Path) -> None:
+    """An explicit service='main' entry collects exactly like service=None."""
+    environment = AsyncMock()
+    environment.capabilities.mounted = True
+    environment.is_dir = AsyncMock(return_value=False)
+    environment.download_file = AsyncMock()
+    handler = _handler(
+        [
+            ArtifactConfig(
+                source="/tmp/answer.json",
+                destination="answers/final.json",
+                service="main",
+            )
+        ],
+    )
+
+    artifacts_dir = tmp_path / "artifacts"
+
+    await handler.download_artifacts(
+        environment,
+        artifacts_dir,
+        source_artifacts_dir=ENV_ARTIFACTS_DIR,
+    )
+
+    environment.download_file.assert_awaited_once_with(
+        source_path="/tmp/answer.json",
+        target_path=artifacts_dir / "answers" / "final.json",
+    )
+
+
 def test_move_dir_contents_moves_contents_and_leaves_source_empty(
     tmp_path: Path,
 ) -> None:

@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from pathlib import Path, PurePath, PurePosixPath
 
 from pier.environments.base import BaseEnvironment, EnvironmentPath
+from pier.models.task.config import MAIN_SERVICE_NAME
 from pier.models.trial.artifact_manifest import (
     ArtifactManifest,
     ArtifactManifestEntry,
@@ -56,6 +57,16 @@ class ArtifactHandler:
         convention_source = self._environment_path_str(source_artifacts_dir)
 
         for artifact in self._normalized_artifacts(artifacts, convention_source):
+            if artifact.service is not None and artifact.service != MAIN_SERVICE_NAME:
+                # Pier only collects from the agent's container. Skipping
+                # loudly beats collecting from the wrong container; sidecar
+                # collection is a separate upcoming change.
+                self.logger.warning(
+                    f"Skipping artifact '{artifact.source}' targeting "
+                    f"unsupported service '{artifact.service}': pier only "
+                    "collects artifacts from the main service."
+                )
+                continue
             entries.append(
                 await self._download_artifact(
                     source_env=source_env,
@@ -124,12 +135,12 @@ class ArtifactHandler:
         ]
 
         if not self._has_artifact_source(normalized, convention_source):
+            # No explicit destination: ArtifactConfig now rejects absolute
+            # destinations, and _host_path already maps the convention source
+            # to the artifacts root when destination is unset.
             normalized.insert(
                 0,
-                ArtifactConfig(
-                    source=convention_source,
-                    destination=convention_source,
-                ),
+                ArtifactConfig(source=convention_source),
             )
         return normalized
 

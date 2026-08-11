@@ -12,6 +12,13 @@ class EnvironmentCapabilities(BaseModel):
     gpus: bool = False
     """Whether the environment can allocate GPUs to containers."""
 
+    tpus: bool = False
+    """Whether the environment can allocate TPU slices to containers.
+
+    No pier environment supports this yet; a task declaring
+    ``[environment.tpu]`` fails loudly at environment construction.
+    """
+
     disable_internet: bool = False
     """Whether the environment can run containers without internet access."""
 

@@ -1,11 +1,13 @@
 # NOTE: When updating this file, also update the corresponding docs page:
 # docs/content/docs/tasks/index.mdx
 
+import math
 import re
 import tomllib
 import warnings
 from enum import Enum
-from typing import Any
+from pathlib import PurePosixPath
+from typing import Any, Literal
 
 import toml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -90,6 +92,11 @@ class PackageInfo(BaseModel):
     name: str = Field(
         ...,
         description="Package name in org/name format (e.g., 'pier/hello-world')",
+    )
+    version: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Task package version. Usually semantic, but any non-empty string is accepted.",
     )
     description: str = Field(
         default="",
@@ -274,6 +281,51 @@ class HealthcheckConfig(BaseModel):
     )
 
 
+class TpuSpec(BaseModel):
+    """Specification for a TPU slice attached to an environment.
+
+    The (type, topology) pair fully determines the GKE node pool the pod
+    lands on *and* the per-pod TPU chip count, so there is no separate
+    user-facing chip-count field — it is derived via chip_count.
+
+    Mirrors Harbor's ``TpuSpec`` (harbor.models.task.config). No pier
+    environment can allocate TPUs yet; a task declaring one fails loudly at
+    environment construction instead of running without the hardware.
+    """
+
+    type: str = Field(
+        min_length=1,
+        description="TPU accelerator type. Accepts either a user-friendly "
+        "alias (e.g., 'v6e', 'trillium', 'v4') or a canonical GKE label "
+        "(e.g., 'tpu-v6e-slice', 'tpu7x').",
+    )
+    topology: str = Field(
+        description="TPU topology as 'NxM' or 'NxMxK' (e.g., '2x4', '2x2x1').",
+    )
+
+    @field_validator("topology")
+    @classmethod
+    def _validate_topology(cls, v: str) -> str:
+        v_clean = v.strip()
+        topology_re = re.compile(r"^[1-9]\d*(x[1-9]\d*)+$")
+        if not topology_re.match(v_clean):
+            raise ValueError(
+                f"Invalid TPU topology '{v}': expected dimensions separated "
+                "by 'x' with each dimension a positive integer (e.g., '2x4', "
+                "'2x2x1', '4x4')."
+            )
+        return v_clean
+
+    @property
+    def chip_count(self) -> int:
+        """Per-pod TPU chip count, derived from the topology.
+
+        The chip count is the product of the topology dimensions (e.g.,
+        '2x2x1' → 4 chips, '2x4' → 8 chips).
+        """
+        return math.prod(int(axis) for axis in self.topology.split("x"))
+
+
 class EnvironmentConfig(NetworkPolicyFieldsMixin):
     build_timeout_sec: float = 600.0  # 10 minutes default
     docker_image: str | None = None
@@ -286,12 +338,20 @@ class EnvironmentConfig(NetworkPolicyFieldsMixin):
     )
     cpus: int | None = None
     memory_mb: int | None = None
-    storage_mb: int = 10240
-    gpus: int = 0
+    # None means "unset" (matching Harbor >= 0.21); environments apply the
+    # legacy runtime defaults (10240 MB storage, 0 GPUs) where a value is
+    # actually required. See pier.environments.base.
+    storage_mb: int | None = None
+    gpus: int | None = None
     gpu_types: list[str] | None = Field(
         default=None,
         description="List of acceptable GPU types (e.g., ['H100', 'A100', 'T4']). None "
         "means any GPU type is acceptable.",
+    )
+    tpu: TpuSpec | None = Field(
+        default=None,
+        description="TPU slice specification (type + topology). When set, the "
+        "environment requests a TPU node matching this spec.",
     )
     allow_internet: bool = Field(
         default=True,
@@ -402,14 +462,22 @@ class EnvironmentConfig(NetworkPolicyFieldsMixin):
         return data
 
 
+MCPTransport = Literal["stdio", "sse", "streamable-http"]
+
+
 class MCPServerConfig(BaseModel):
     """Configuration for an MCP server available to the agent."""
 
     name: str
-    transport: str = "sse"  # "sse" | "streamable-http" | "stdio"
+    transport: MCPTransport = "sse"
     url: str | None = None  # required for sse/streamable-http
     command: str | None = None  # for stdio
     args: list[str] = Field(default_factory=list)  # for stdio
+
+    @field_validator("transport", mode="before")
+    @classmethod
+    def normalize_transport(cls, value: Any) -> Any:
+        return "streamable-http" if value == "http" else value
 
     @model_validator(mode="after")
     def validate_transport_fields(self) -> "MCPServerConfig":
@@ -428,6 +496,82 @@ class ArtifactConfig(BaseModel):
         description="Patterns to exclude when downloading a directory artifact "
         "(passed as tar --exclude flags).",
     )
+    service: str | None = Field(
+        default=None,
+        description="Docker Compose service to collect this artifact from. "
+        "None or 'main' targets the agent's container. Pier does not collect "
+        "from sidecar services yet; entries targeting them are skipped with a "
+        "warning at collection time.",
+    )
+
+    @field_validator("service")
+    @classmethod
+    def _validate_service(cls, value: str | None) -> str | None:
+        return _validate_compose_service_name(value)
+
+    @field_validator("source")
+    @classmethod
+    def _validate_source(cls, value: str) -> str:
+        """Sources are container paths that also determine host placement.
+
+        Reject ``..`` components so a crafted source cannot escape the
+        trial's artifacts directory when mirrored onto the host.
+        """
+        if any(part == ".." for part in PurePosixPath(value).parts):
+            raise ValueError(
+                f"Artifact source must not contain '..' components, got: {value!r}"
+            )
+        return value
+
+    @field_validator("destination")
+    @classmethod
+    def _validate_destination(cls, value: str | None) -> str | None:
+        """Destinations are host paths relative to the trial's artifacts dir.
+
+        Reject anything that could escape that directory or shadow the
+        reserved ``manifest.json``.
+        """
+        if value is None:
+            return value
+        if not value:
+            return None
+        if "\\" in value:
+            raise ValueError(
+                "Artifact destination must use forward slashes as path "
+                f"separators, got: {value!r}"
+            )
+        path = PurePosixPath(value)
+        if path.is_absolute():
+            raise ValueError(
+                f"Artifact destination must be a relative path, got: {value!r}"
+            )
+        parts = path.parts
+        if not parts:
+            raise ValueError(
+                f"Artifact destination must name a file or directory, got: {value!r}"
+            )
+        if any(part == ".." for part in parts):
+            raise ValueError(
+                f"Artifact destination must not contain '..' components, got: {value!r}"
+            )
+        if value.rstrip("/") == "manifest.json":
+            raise ValueError(
+                "Artifact destination 'manifest.json' is reserved for the "
+                "collection manifest."
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_sidecar_source(self) -> "ArtifactConfig":
+        if self.service is not None and self.service != MAIN_SERVICE_NAME:
+            if not (
+                self.source.startswith("/") or re.match(r"^[A-Za-z]:[/\\]", self.source)
+            ):
+                raise ValueError(
+                    f"Artifact source {self.source!r} collected from service "
+                    f"{self.service!r} must be an absolute path."
+                )
+        return self
 
 
 class StepConfig(BaseModel):
@@ -466,8 +610,22 @@ class MultiStepRewardStrategy(str, Enum):
     FINAL = "final"
 
 
+# The newest Harbor task schema pier tracks (Harbor 0.21). Tasks declaring a
+# newer schema_version still load, but with a warning: they may use constructs
+# pier does not know about, which extra="ignore" would otherwise drop silently.
+SUPPORTED_SCHEMA_VERSION = "1.4"
+
+
+def _schema_version_tuple(version: str) -> tuple[int, ...] | None:
+    """Parse a dotted-integer schema version; None when not comparable."""
+    try:
+        return tuple(int(part) for part in version.strip().split("."))
+    except ValueError:
+        return None
+
+
 class TaskConfig(BaseModel):
-    schema_version: str = "1.2"
+    schema_version: str = SUPPORTED_SCHEMA_VERSION
     task: PackageInfo | None = Field(
         default=None,
         description="Package information for the task, parsed from the [task] section of task.toml.",
@@ -499,6 +657,48 @@ class TaskConfig(BaseModel):
         if isinstance(data, dict) and "version" in data:
             data.setdefault("schema_version", data.pop("version"))
         return data
+
+    @model_validator(mode="after")
+    def warn_on_newer_schema_version(self) -> "TaskConfig":
+        """Warn when a task declares a schema newer than pier supports.
+
+        Pier's models use extra="ignore", so unknown constructs from a newer
+        Harbor schema are dropped silently; this makes that visible. Versions
+        are compared as dotted-integer tuples; non-numeric versions are
+        tolerated and not compared. Older versions load silently as before.
+        """
+        declared = _schema_version_tuple(self.schema_version)
+        supported = _schema_version_tuple(SUPPORTED_SCHEMA_VERSION)
+        if declared is not None and supported is not None and declared > supported:
+            warnings.warn(
+                f"Task declares schema_version '{self.schema_version}', newer "
+                f"than the '{SUPPORTED_SCHEMA_VERSION}' schema pier supports; "
+                "constructs added after that schema may be ignored.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_artifact_collisions(self) -> "TaskConfig":
+        """Reject artifact sets whose entries would overlap when collected."""
+        # Local import to avoid a circular dependency at module load time.
+        from pier.models.task.artifacts import (
+            convention_source_for_os,
+            validate_artifact_entries,
+        )
+
+        convention_source = convention_source_for_os(self.environment.os)
+        validate_artifact_entries(
+            self.artifacts,
+            convention_source=convention_source,
+        )
+        for step in self.steps or []:
+            validate_artifact_entries(
+                [*self.artifacts, *step.artifacts],
+                convention_source=convention_source,
+            )
+        return self
 
     @model_validator(mode="after")
     def resolve_network_modes(self) -> "TaskConfig":

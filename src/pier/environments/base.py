@@ -34,6 +34,13 @@ EnvironmentPath = str | PurePath
 _TRANSFER_TAR_TEMPLATE = ".hb-transfer-{uuid}.tar.gz"
 _ENV_TRANSFER_TAR_DIR = PurePosixPath("/tmp")
 
+# Runtime fallbacks for [environment] resources left unset (None) in
+# task.toml. These were the schema defaults before pier tracked Harbor 0.21
+# (which leaves both unset); applying them here keeps an unset value
+# provisioning exactly what it did before.
+DEFAULT_STORAGE_MB = 10240
+DEFAULT_GPUS = 0
+
 
 class HealthcheckError(RuntimeError):
     pass
@@ -124,6 +131,7 @@ class BaseEnvironment(ABC):
         self._validate_definition()
         self._validate_resource_mode_support()
         self._validate_gpu_support()
+        self._validate_tpu_support()
         self._validate_internet_config()
         self._validate_agent_setup_options()
         self._validate_windows_support()
@@ -235,12 +243,14 @@ class BaseEnvironment(ABC):
         return self._resource_value("memory")
 
     @property
-    def _effective_storage_mb(self) -> int | None:
-        return self.task_env_config.storage_mb
+    def _effective_storage_mb(self) -> int:
+        storage_mb = self.task_env_config.storage_mb
+        return storage_mb if storage_mb is not None else DEFAULT_STORAGE_MB
 
     @property
     def _effective_gpus(self) -> int:
-        return self.task_env_config.gpus or 0
+        gpus = self.task_env_config.gpus
+        return gpus if gpus is not None else DEFAULT_GPUS
 
     def _validate_resource_mode_support(self) -> None:
         resource_capabilities = type(self).resource_capabilities()
@@ -482,6 +492,25 @@ class BaseEnvironment(ABC):
                 f"Task requires {self._effective_gpus} GPU(s) but {self.type()} "
                 f"environment does not support GPU allocation. Please use a GPU-capable "
                 f"environment type (e.g., Modal, Docker with nvidia-docker)."
+            )
+
+    def _validate_tpu_support(self):
+        """
+        Validate that TPU requirements are supported by this environment.
+
+        A task declaring ``[environment.tpu]`` must fail loudly rather than
+        run silently without the hardware.
+
+        Raises:
+            ValueError: If the task requests a TPU but the environment doesn't
+                support TPU allocation.
+        """
+        tpu = self.task_env_config.tpu
+        if tpu is not None and not self.capabilities.tpus:
+            raise ValueError(
+                f"Task requests a TPU (type '{tpu.type}', topology "
+                f"'{tpu.topology}') but the {self.type()} environment does "
+                "not support TPU allocation."
             )
 
     def _validate_internet_config(self):
