@@ -14,6 +14,7 @@ from typer import Option, Typer
 from pier.cli.host_env import confirm_host_env_access
 from pier.cli.utils import parse_env_vars, parse_kwargs, run_async
 from pier.models.agent.name import AgentName
+from pier.models.agent.network import normalize_allowed_hosts
 from pier.models.environment_type import EnvironmentType
 from pier.models.job.config import (
     DatasetConfig,
@@ -356,6 +357,17 @@ def start(
             show_default=False,
         ),
     ] = None,
+    allow_agent_hosts: Annotated[
+        list[str] | None,
+        Option(
+            "--allow-agent-host",
+            help="Hostname merged into the agent's inference allowlist for this run, "
+            "e.g. 'api.example.com' or '*.example.com'. Only takes effect when the "
+            "task blocks internet access. Can be used multiple times.",
+            rich_help_panel="Agent",
+            show_default=False,
+        ),
+    ] = None,
     environment_type: Annotated[
         EnvironmentType | None,
         Option(
@@ -632,6 +644,8 @@ def start(
     if retry_exclude_exceptions is not None:
         config.retry.exclude_exceptions = set(retry_exclude_exceptions)
 
+    extra_allowed_hosts = normalize_allowed_hosts(allow_agent_hosts or [])
+
     if agent_name is not None or agent_import_path is not None:
         config.agents = []
         parsed_kwargs = parse_kwargs(agent_kwargs)
@@ -645,6 +659,7 @@ def start(
                     model_name=model_name,
                     kwargs=parsed_kwargs,
                     env=parsed_env,
+                    extra_allowed_hosts=extra_allowed_hosts,
                 )
                 for model_name in model_names
             ]
@@ -655,17 +670,23 @@ def start(
                     import_path=agent_import_path,
                     kwargs=parsed_kwargs,
                     env=parsed_env,
+                    extra_allowed_hosts=extra_allowed_hosts,
                 )
             ]
     else:
         parsed_kwargs = parse_kwargs(agent_kwargs)
         parsed_env = parse_env_vars(agent_env)
-        if parsed_kwargs or parsed_env:
+        if parsed_kwargs or parsed_env or extra_allowed_hosts:
             for agent in config.agents:
                 if parsed_kwargs:
                     agent.kwargs.update(parsed_kwargs)
                 if parsed_env:
                     agent.env.update(parsed_env)
+                if extra_allowed_hosts:
+                    agent.extra_allowed_hosts = [
+                        *agent.extra_allowed_hosts,
+                        *extra_allowed_hosts,
+                    ]
 
     if environment_type is not None:
         config.environment.type = environment_type

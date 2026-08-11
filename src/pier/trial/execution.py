@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import warnings
 from dataclasses import dataclass
 from logging import Logger
 from typing import Any
@@ -17,6 +18,7 @@ from pier.environments.base import BaseEnvironment
 from pier.environments.factory import EnvironmentFactory
 from pier.models.agent.context import AgentContext
 from pier.models.agent.name import AgentName
+from pier.models.agent.network import NetworkAllowlist
 from pier.models.task.config import TaskOS
 from pier.models.task.task import Task
 from pier.models.trial.config import AgentConfig, EnvironmentConfig
@@ -80,6 +82,7 @@ class TrialExecution:
             trial_paths=trial_paths,
             logger=logger,
             agent=agent,
+            agent_config=agent_config,
         )
         return cls(
             task=task,
@@ -181,6 +184,29 @@ class TrialExecution:
         )
 
     @staticmethod
+    def _resolve_network_allowlist(
+        *,
+        agent,
+        agent_config: AgentConfig,
+        allow_internet: bool,
+    ) -> NetworkAllowlist:
+        """Union the run's extra hosts into the agent's derived allowlist."""
+        allowlist: NetworkAllowlist = agent.network_allowlist()
+        if not agent_config.extra_allowed_hosts:
+            return allowlist
+        if allow_internet:
+            warnings.warn(
+                f"Run-specific allowlist host(s) {agent_config.extra_allowed_hosts!r} "
+                "are ignored because the effective network policy is public.",
+                UserWarning,
+                stacklevel=3,
+            )
+            return allowlist
+        return NetworkAllowlist(
+            domains=[*allowlist.domains, *agent_config.extra_allowed_hosts]
+        )
+
+    @staticmethod
     def _create_environment(
         *,
         environment_config: EnvironmentConfig,
@@ -189,6 +215,7 @@ class TrialExecution:
         trial_paths: TrialPaths,
         logger: Logger,
         agent,
+        agent_config: AgentConfig,
     ) -> BaseEnvironment:
         return EnvironmentFactory.create_environment_from_config(
             config=environment_config,
@@ -199,7 +226,11 @@ class TrialExecution:
             task_env_config=task.config.environment,
             logger=logger,
             agent_install_spec=agent.install_spec(),
-            network_allowlist=agent.network_allowlist(),
+            network_allowlist=TrialExecution._resolve_network_allowlist(
+                agent=agent,
+                agent_config=agent_config,
+                allow_internet=task.config.environment.allow_internet,
+            ),
             default_user=task.config.agent.user,
         )
 
