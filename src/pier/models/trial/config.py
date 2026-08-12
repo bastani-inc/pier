@@ -62,9 +62,10 @@ class AgentConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     extra_allowed_hosts: list[str] = Field(
         default_factory=list,
-        description="Run-specific hostnames merged into the agent's inference "
-        "allowlist for the agent phase. Accepts Harbor's '*.foo.com' wildcard "
-        "spelling and normalizes it to pier's '.foo.com' suffix form.",
+        description="Run-specific hostnames, IP addresses or CIDR ranges merged "
+        "into the agent's inference allowlist for the agent phase. Accepts "
+        "Harbor's '*.foo.com' wildcard spelling and normalizes it to pier's "
+        "'.foo.com' suffix form.",
     )
 
     @field_validator("extra_allowed_hosts")

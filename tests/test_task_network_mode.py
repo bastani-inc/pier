@@ -235,9 +235,24 @@ def test_allowed_hosts_normalized_at_parse():
     assert cfg.environment.allowed_hosts == [".example.com", "api.example.com"]
 
 
-@pytest.mark.parametrize("host", ["10.0.0.1", "10.0.0.0/8", "2001:db8::1"])
-def test_allowed_hosts_ip_and_cidr_still_rejected(host: str):
-    with pytest.raises(ValidationError, match="not supported by pier yet"):
+def test_allowed_hosts_accepts_ips_and_cidrs():
+    cfg = TaskConfig.model_validate_toml(
+        "[environment]\nallowed_hosts = "
+        '["10.0.0.0/8", "api.example.com", "2001:0DB8::0001"]\n'
+    )
+    # Hostnames sort ahead of the canonicalized IP entries.
+    assert cfg.environment.allowed_hosts == [
+        "api.example.com",
+        "10.0.0.0/8",
+        "2001:db8::1",
+    ]
+
+
+@pytest.mark.parametrize(
+    "host", ["10.0.0.1:443", "https://10.0.0.1", "*.10.0.0.1", "10.0.0.1/24"]
+)
+def test_allowed_hosts_rejects_malformed_ip_entries(host: str):
+    with pytest.raises(ValidationError):
         TaskConfig.model_validate_toml(f"[environment]\nallowed_hosts = [\"{host}\"]\n")
 
 

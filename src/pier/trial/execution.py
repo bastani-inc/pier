@@ -205,7 +205,9 @@ class TrialExecution:
                 stacklevel=3,
             )
             return allowlist
-        return NetworkAllowlist(domains=[*allowlist.domains, *extra_hosts])
+        return NetworkAllowlist.from_entries(
+            [*allowlist.domains, *allowlist.ip_entries, *extra_hosts]
+        )
 
     @staticmethod
     def _create_environment(

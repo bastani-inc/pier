@@ -69,7 +69,8 @@ class NetworkPolicyFieldsMixin(BaseModel):
         default=None,
         description="Hosts reachable under network_mode='allowlist'. Harbor's "
         "'*.foo.com' wildcard is normalized to pier's '.foo.com' suffix form "
-        "at parse time; IP literals and CIDR ranges are rejected.",
+        "at parse time. IP address literals and CIDR ranges (IPv4 and IPv6) "
+        "are accepted and canonicalized.",
     )
 
     @field_validator("allowed_hosts")

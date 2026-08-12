@@ -978,7 +978,7 @@ class ModalEnvironment(BaseEnvironment):
 
     async def _ensure_egress_proxy(self) -> None:
         allowlist = self.network_allowlist
-        if self.task_env_config.allow_internet or not allowlist.domains:
+        if self.task_env_config.allow_internet or allowlist.is_empty:
             return
         if self._compose_mode:
             raise ValueError(
@@ -996,7 +996,7 @@ class ModalEnvironment(BaseEnvironment):
         self._egress_proxy_sandbox = await Sandbox.create.aio(
             "sh",
             "-c",
-            squid_bootstrap_command(),
+            squid_bootstrap_command(allowlist),
             app=self._app,
             image=proxy_image,
             env=proxy_policy_env(allowlist, token),

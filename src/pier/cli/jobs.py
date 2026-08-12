@@ -361,9 +361,10 @@ def start(
         list[str] | None,
         Option(
             "--allow-agent-host",
-            help="Hostname merged into the agent's inference allowlist for this run, "
-            "e.g. 'api.example.com' or '*.example.com'. Only takes effect when the "
-            "task blocks internet access. Can be used multiple times.",
+            help="Hostname, IP address or CIDR range merged into the agent's "
+            "inference allowlist for this run, e.g. 'api.example.com', "
+            "'*.example.com' or '10.0.0.0/8'. Only takes effect when the task "
+            "blocks internet access. Can be used multiple times.",
             rich_help_panel="Agent",
             show_default=False,
         ),

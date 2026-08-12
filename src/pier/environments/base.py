@@ -547,7 +547,7 @@ class BaseEnvironment(ABC):
 
         if (
             not self.task_env_config.allow_internet
-            and self.network_allowlist.domains
+            and not self.network_allowlist.is_empty
             and not self.capabilities.filtered_egress
         ):
             raise ValueError(

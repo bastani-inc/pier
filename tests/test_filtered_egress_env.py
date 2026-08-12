@@ -11,6 +11,7 @@ from pier.environments.agent_setup import (
 from pier.environments.base import ExecResult
 from pier.environments.docker.docker import DockerEnvironment
 from pier.environments.modal import ModalEnvironment, _ModalDinD, _ModalDirect
+from pier.models.agent.network import NetworkAllowlist
 
 
 def test_docker_proxy_compose_does_not_inject_proxy_env_into_main(tmp_path):
@@ -18,7 +19,7 @@ def test_docker_proxy_compose_does_not_inject_proxy_env_into_main(tmp_path):
     write_docker_proxy_compose(
         path=path,
         proxy_dir=tmp_path / "proxy",
-        allowlist=type("Allowlist", (), {"domains": ["api.openai.com"]})(),
+        allowlist=NetworkAllowlist(domains=["api.openai.com"]),
         token="secret",
     )
 

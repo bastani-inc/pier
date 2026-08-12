@@ -8,6 +8,7 @@ import shlex
 import socket
 import tempfile
 from abc import abstractmethod
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Union
 from uuid import uuid4
@@ -97,10 +98,30 @@ def _collapse_cidrs_to_budget(cidrs: list[str], *, budget: int) -> list[str]:
     return sorted(str(net) for net in working)
 
 
+def daytona_passthrough_cidrs(
+    ip_entries: Sequence[str],
+) -> tuple[list[str], list[str]]:
+    """Split allowlist IP entries into Daytona-ready IPv4 CIDRs and ignored ones.
+
+    Daytona network limits accept IPv4 CIDR blocks only, so IPv6 entries are
+    reported back as ignored rather than passed through.
+    """
+    ipv4: list[str] = []
+    ignored: list[str] = []
+    for entry in ip_entries:
+        network = ipaddress.ip_network(entry, strict=False)
+        if network.version == 4:
+            ipv4.append(network.compressed)
+        else:
+            ignored.append(entry)
+    return ipv4, ignored
+
+
 def _cidrs_from_domain_resolution(
     domain_resolution: dict[str, list[str]],
+    passthrough_cidrs: Sequence[str] = (),
 ) -> list[str]:
-    cidrs: list[str] = []
+    cidrs: list[str] = list(passthrough_cidrs)
     for addrs in domain_resolution.values():
         for addr in addrs:
             ip = ipaddress.ip_address(addr)
@@ -114,11 +135,13 @@ def _cidrs_from_domain_resolution(
 
 def resolve_network_allowlist_to_daytona_cidrs(
     domains: list[str],
+    ip_entries: Sequence[str] = (),
 ) -> tuple[dict[str, list[str]], list[str]]:
     """Resolve exact allowlist domains into Daytona-compatible IPv4 CIDRs.
 
     Daytona network limits accept IPv4 CIDR blocks only. Leading-dot suffix
     domains cannot be resolved deterministically, so they are ignored here.
+    IPv4 address and CIDR entries need no resolution and pass straight through.
     """
     domain_resolution: dict[str, list[str]] = {}
     for domain in sorted(set(domains)):
@@ -140,7 +163,10 @@ def resolve_network_allowlist_to_daytona_cidrs(
             addrs = []
         domain_resolution[domain] = addrs
 
-    return domain_resolution, _cidrs_from_domain_resolution(domain_resolution)
+    passthrough, _ignored = daytona_passthrough_cidrs(ip_entries)
+    return domain_resolution, _cidrs_from_domain_resolution(
+        domain_resolution, passthrough
+    )
 
 
 class DaytonaClientManager:
@@ -939,29 +965,35 @@ class DaytonaEnvironment(BaseEnvironment):
         if self.task_env_config.allow_internet:
             return {"network_block_all": False}
 
-        if not self.network_allowlist.domains:
+        if self.network_allowlist.is_empty:
             return {"network_block_all": True}
 
         if self._resolved_network_allow_list is None:
-            suffix_domains = [
+            passthrough, ignored_ips = daytona_passthrough_cidrs(
+                self.network_allowlist.ip_entries
+            )
+            ignored = [
                 domain
                 for domain in self.network_allowlist.domains
                 if domain.startswith(".")
-            ]
-            if suffix_domains:
+            ] + ignored_ips
+            if ignored:
                 self.logger.warning(
                     "Daytona network limits only accept IPv4 CIDRs; ignoring "
-                    "suffix allowlist domains: %s",
-                    ", ".join(suffix_domains),
+                    "allowlist entries: %s",
+                    ", ".join(ignored),
                 )
 
             domain_resolution, cidrs = resolve_network_allowlist_to_daytona_cidrs(
-                self.network_allowlist.domains
+                self.network_allowlist.domains,
+                self.network_allowlist.ip_entries,
             )
-            full_cidr_count = sum(len(addrs) for addrs in domain_resolution.values())
+            full_cidr_count = sum(
+                len(addrs) for addrs in domain_resolution.values()
+            ) + len(passthrough)
             if full_cidr_count > DAYTONA_MAX_NETWORK_ALLOWLIST_CIDRS:
                 self.logger.warning(
-                    "Resolved Daytona network allowlist has %d IPv4 addresses; "
+                    "Resolved Daytona network allowlist has %d IPv4 entries; "
                     "collapsing to %d CIDR entries. This can allow broader CDN "
                     "ranges than the original domains.",
                     full_cidr_count,
@@ -969,6 +1001,7 @@ class DaytonaEnvironment(BaseEnvironment):
                 )
             self._network_resolution_debug = {
                 "domains": self.network_allowlist.domains,
+                "ip_entries": self.network_allowlist.ip_entries,
                 "domain_resolution": domain_resolution,
                 "cidr_allowlist": cidrs,
             }

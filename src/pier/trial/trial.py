@@ -410,7 +410,9 @@ class Trial:
             mounts_json=self._verifier_env_mounts(env_config),
             agent_install_spec=None,
             network_allowlist=(
-                NetworkAllowlist(domains=verifier_hosts) if verifier_hosts else None
+                NetworkAllowlist.from_entries(verifier_hosts)
+                if verifier_hosts
+                else None
             ),
             default_user=(
                 step_cfg.verifier.user

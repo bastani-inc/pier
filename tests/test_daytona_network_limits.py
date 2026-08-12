@@ -56,7 +56,7 @@ def test_daytona_network_params_use_resolved_allowlist(monkeypatch):
 
     monkeypatch.setattr(
         "pier.environments.daytona.resolve_network_allowlist_to_daytona_cidrs",
-        lambda domains: (
+        lambda domains, ip_entries=(): (
             {"api.openai.com": ["203.0.113.10"]},
             ["203.0.113.10/32"],
         ),
@@ -80,10 +80,53 @@ def test_daytona_network_params_block_when_no_cidrs(monkeypatch):
 
     monkeypatch.setattr(
         "pier.environments.daytona.resolve_network_allowlist_to_daytona_cidrs",
-        lambda domains: ({}, []),
+        lambda domains, ip_entries=(): ({}, []),
     )
 
     assert DaytonaEnvironment._network_params(env) == {"network_block_all": True}
+
+
+def test_daytona_passes_ip_entries_through_without_resolution(monkeypatch):
+    def fail_getaddrinfo(*_args, **_kwargs):
+        raise AssertionError("IP entries must not be resolved")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fail_getaddrinfo)
+
+    resolution, cidrs = resolve_network_allowlist_to_daytona_cidrs(
+        [], ["203.0.113.7", "198.51.100.0/24", "2001:db8::1"]
+    )
+
+    # IPv6 entries have no Daytona equivalent, so they are dropped.
+    assert resolution == {}
+    assert cidrs == ["198.51.100.0/24", "203.0.113.7/32"]
+
+
+def test_daytona_ip_entries_count_toward_the_cidr_budget(monkeypatch):
+    entries = [f"203.0.113.{i}" for i in range(1, 18)]
+
+    _resolution, cidrs = resolve_network_allowlist_to_daytona_cidrs([], entries)
+
+    assert len(cidrs) <= DAYTONA_MAX_NETWORK_ALLOWLIST_CIDRS
+
+
+def test_daytona_network_params_include_ip_entries(caplog):
+    env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    env._explicit_network_allow_list = None
+    env._explicit_network_block_all = None
+    env._resolved_network_allow_list = None
+    env._network_resolution_debug = {}
+    env.task_env_config = type("TaskEnv", (), {"allow_internet": False})()
+    env.network_allowlist = NetworkAllowlist(ip_entries=["203.0.113.7", "2001:db8::1"])
+    env.logger = logging.getLogger("test")
+
+    with caplog.at_level(logging.WARNING):
+        params = DaytonaEnvironment._network_params(env)
+
+    assert params == {
+        "network_block_all": False,
+        "network_allow_list": "203.0.113.7/32",
+    }
+    assert "2001:db8::1" in caplog.text
 
 
 def test_daytona_compose_keeps_main_network_when_sandbox_allowlist_is_active():

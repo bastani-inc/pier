@@ -388,7 +388,7 @@ class DockerEnvironment(BaseEnvironment):
 
     def _prepare_egress_proxy_compose(self) -> None:
         allowlist = self.network_allowlist
-        if self.task_env_config.allow_internet or not allowlist.domains:
+        if self.task_env_config.allow_internet or allowlist.is_empty:
             return
         if self._uses_compose:
             raise ValueError(

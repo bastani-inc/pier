@@ -35,10 +35,17 @@ def test_duplicate_entries_collapse():
     assert config.extra_allowed_hosts == [".example.com"]
 
 
-@pytest.mark.parametrize("host", ["10.0.0.1", "10.0.0.0/8", "2001:db8::1", "fd00::/8"])
-def test_ip_literals_and_cidrs_are_rejected(host: str):
-    with pytest.raises(ValidationError, match="not supported by pier yet"):
-        AgentConfig(extra_allowed_hosts=[host])
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("10.0.0.1", "10.0.0.1"),
+        ("10.0.0.0/8", "10.0.0.0/8"),
+        ("2001:0DB8::0001", "2001:db8::1"),
+        ("FD00::/8", "fd00::/8"),
+    ],
+)
+def test_ip_literals_and_cidrs_are_accepted(host: str, expected: str):
+    assert AgentConfig(extra_allowed_hosts=[host]).extra_allowed_hosts == [expected]
 
 
 def test_inner_wildcard_is_rejected():
@@ -92,6 +99,17 @@ def test_task_declared_hosts_union_with_derived_and_extra_hosts():
     )
 
     assert allowlist.domains == [".example.com", "api.anthropic.com", "pypi.org"]
+
+
+def test_extra_ip_entries_reach_the_run_allowlist():
+    allowlist = TrialExecution._resolve_network_allowlist(
+        agent=_StubAgent("api.anthropic.com"),
+        agent_config=AgentConfig(extra_allowed_hosts=["10.0.0.0/8", "203.0.113.7"]),
+        allow_internet=False,
+    )
+
+    assert allowlist.domains == ["api.anthropic.com"]
+    assert allowlist.ip_entries == ["10.0.0.0/8", "203.0.113.7"]
 
 
 def test_public_network_policy_warns_and_ignores_task_hosts():

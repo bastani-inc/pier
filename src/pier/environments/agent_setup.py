@@ -95,12 +95,31 @@ def new_proxy_token() -> str:
     return secrets.token_urlsafe(24)
 
 
-def squid_bootstrap_command() -> str:
-    return r"""#!/usr/bin/env bash
+def squid_bootstrap_command(allowlist: NetworkAllowlist) -> str:
+    """Build the proxy bootstrap script for one allowlist.
+
+    The allowlist values travel in the environment (see :func:`proxy_policy_env`),
+    but the ACL lines are baked in here: squid warns about an ACL pointed at an
+    empty file and such an ACL matches nothing, so a rule is emitted only when
+    its side of the allowlist has entries.
+    """
+    acls: list[str] = []
+    rules: list[str] = []
+    if allowlist.domains:
+        acls.append('acl allowed_domains dstdomain "/tmp/allowed_domains.txt"')
+        rules.append("http_access allow authenticated allowed_domains")
+    if allowlist.ip_entries:
+        acls.append('acl allowed_ips dst "/tmp/allowed_ips.txt"')
+        rules.append("http_access allow authenticated allowed_ips")
+    acl_block = "\n".join(acls)
+    rule_block = "\n".join(rules)
+    return rf"""#!/usr/bin/env bash
 set -eu
 
 printf '%s' "$ALLOWLIST_DOMAINS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' \
   > /tmp/allowed_domains.txt
+printf '%s' "$ALLOWLIST_IPS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' \
+  > /tmp/allowed_ips.txt
 
 htpasswd -bc /tmp/squid.passwd agent "$PROXY_TOKEN"
 
@@ -116,11 +135,11 @@ acl authenticated proxy_auth REQUIRED
 acl SSL_ports port 443
 acl Safe_ports port 80 443
 acl CONNECT method CONNECT
-acl allowed_domains dstdomain "/tmp/allowed_domains.txt"
+{acl_block}
 
 http_access deny !Safe_ports
 http_access deny CONNECT !SSL_ports
-http_access allow authenticated allowed_domains
+{rule_block}
 http_access deny all
 
 cache deny all
@@ -138,6 +157,7 @@ def proxy_policy_env(allowlist: NetworkAllowlist, token: str) -> dict[str, str]:
     return {
         "PROXY_TOKEN": token,
         "ALLOWLIST_DOMAINS": ",".join(allowlist.domains),
+        "ALLOWLIST_IPS": ",".join(allowlist.ip_entries),
     }
 
 
@@ -164,7 +184,7 @@ def write_docker_proxy_compose(
             ]
         )
     )
-    (proxy_dir / "start-squid.sh").write_text(squid_bootstrap_command())
+    (proxy_dir / "start-squid.sh").write_text(squid_bootstrap_command(allowlist))
     compose = {
         "services": {
             "main": {
