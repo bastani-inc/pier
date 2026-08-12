@@ -2,8 +2,8 @@
 
 Regression tests for the air-gap escape where pier silently ignored
 ``network_mode = "no-network"`` and defaulted to allow_internet=True.
-Scope: 'no-network' and 'public' only; 'allowlist'/'allowed_hosts' are
-rejected at parse time rather than silently mis-enforced.
+'allowlist' resolves the same closed way and additionally collects the task's
+``allowed_hosts`` for the egress proxy.
 """
 
 import pytest
@@ -122,15 +122,81 @@ def test_legacy_allow_internet_still_honored():
     assert cfg.environment.allow_internet is True  # unchanged legacy default
 
 
-def test_allowlist_mode_rejected():
-    with pytest.raises(ValidationError):
-        TaskConfig.model_validate_toml("[agent]\nnetwork_mode = \"allowlist\"\n")
+ALLOWLIST_TASK = """
+[agent]
+network_mode = "allowlist"
+allowed_hosts = ["*.Example.com"]
+[verifier]
+environment_mode = "separate"
+allowed_hosts = ["pypi.org"]
+[verifier.environment]
+docker_image = "example/verifier:tag"
+[environment]
+network_mode = "allowlist"
+allowed_hosts = ["files.pythonhosted.org", "*.example.com"]
+docker_image = "example/image:tag"
+[[steps]]
+name = "one"
+[steps.agent]
+allowed_hosts = ["step.example.org"]
+[steps.verifier]
+environment_mode = "separate"
+[steps.verifier.environment]
+allowed_hosts = ["crates.io"]
+"""
 
 
-def test_allowed_hosts_rejected():
+def test_allowlist_mode_resolves_to_no_internet():
+    cfg = TaskConfig.model_validate_toml(ALLOWLIST_TASK)
+    assert cfg.environment.network_mode is NetworkMode.ALLOWLIST
+    assert cfg.environment.allow_internet is False
+    assert cfg.verifier.environment.allow_internet is False
+    assert cfg.steps[0].verifier.environment.allow_internet is False
+
+
+def test_allowlist_agent_override_beats_public_environment():
+    cfg = TaskConfig.model_validate_toml(
+        "[agent]\nnetwork_mode = \"allowlist\"\n"
+        "[environment]\nnetwork_mode = \"public\"\n"
+    )
+    assert cfg.environment.allow_internet is False
+
+
+def test_declared_allowed_hosts_unions_every_scope():
+    cfg = TaskConfig.model_validate_toml(ALLOWLIST_TASK)
+    assert cfg.declared_allowed_hosts() == [
+        ".example.com",
+        "crates.io",
+        "files.pythonhosted.org",
+        "pypi.org",
+        "step.example.org",
+    ]
+
+
+def test_allowed_hosts_normalized_at_parse():
+    cfg = TaskConfig.model_validate_toml(
+        "[environment]\nallowed_hosts = [\"*.Example.COM.\", \" API.Example.com \"]\n"
+    )
+    assert cfg.environment.allowed_hosts == [".example.com", "api.example.com"]
+
+
+@pytest.mark.parametrize("host", ["10.0.0.1", "10.0.0.0/8", "2001:db8::1"])
+def test_allowed_hosts_ip_and_cidr_still_rejected(host: str):
+    with pytest.raises(ValidationError, match="not supported by pier yet"):
+        TaskConfig.model_validate_toml(f"[environment]\nallowed_hosts = [\"{host}\"]\n")
+
+
+def test_shared_verifier_conflicting_allowlist_override_rejected():
     with pytest.raises(ValidationError):
         TaskConfig.model_validate_toml(
-            "[agent]\nnetwork_mode = \"no-network\"\nallowed_hosts = [\"a.com\"]\n"
+            """
+[agent]
+network_mode = "allowlist"
+[verifier]
+network_mode = "public"
+[environment]
+docker_image = "example/image:tag"
+"""
         )
 
 

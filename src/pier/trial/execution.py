@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from logging import Logger
 from typing import Any
@@ -189,22 +190,22 @@ class TrialExecution:
         agent,
         agent_config: AgentConfig,
         allow_internet: bool,
+        task_allowed_hosts: Sequence[str] = (),
     ) -> NetworkAllowlist:
-        """Union the run's extra hosts into the agent's derived allowlist."""
+        """Union the task's and the run's extra hosts into the agent's allowlist."""
         allowlist: NetworkAllowlist = agent.network_allowlist()
-        if not agent_config.extra_allowed_hosts:
+        extra_hosts = [*task_allowed_hosts, *agent_config.extra_allowed_hosts]
+        if not extra_hosts:
             return allowlist
         if allow_internet:
             warnings.warn(
-                f"Run-specific allowlist host(s) {agent_config.extra_allowed_hosts!r} "
-                "are ignored because the effective network policy is public.",
+                f"Allowlist host(s) {extra_hosts!r} are ignored because the "
+                "effective network policy is public.",
                 UserWarning,
                 stacklevel=3,
             )
             return allowlist
-        return NetworkAllowlist(
-            domains=[*allowlist.domains, *agent_config.extra_allowed_hosts]
-        )
+        return NetworkAllowlist(domains=[*allowlist.domains, *extra_hosts])
 
     @staticmethod
     def _create_environment(
@@ -230,6 +231,7 @@ class TrialExecution:
                 agent=agent,
                 agent_config=agent_config,
                 allow_internet=task.config.environment.allow_internet,
+                task_allowed_hosts=task.config.declared_allowed_hosts(),
             ),
             default_user=task.config.agent.user,
         )

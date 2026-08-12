@@ -13,6 +13,7 @@ import toml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from pier.constants import ORG_NAME_PATTERN
+from pier.models.agent.network import normalize_allowed_hosts
 
 
 class TaskOS(str, Enum):
@@ -45,35 +46,36 @@ class NetworkMode(str, Enum):
 
 
 class NetworkPolicyFieldsMixin(BaseModel):
-    """``network_mode`` field shared by the [environment] scope and the
-    [agent]/[verifier] phase overrides (Harbor's PhaseNetworkPolicyConfig
-    equivalent). Pier currently enforces 'no-network' and 'public' only;
-    'allowlist' (and its 'allowed_hosts' companion) is rejected at parse time
-    rather than silently mis-enforced."""
+    """``network_mode``/``allowed_hosts`` fields shared by the [environment]
+    scope and the [agent]/[verifier] phase overrides (Harbor's
+    PhaseNetworkPolicyConfig equivalent).
+
+    Pier deviates from Harbor on 'allowlist'. Harbor scopes an allowlist to the
+    phase that declares it and enforces it container-wide; pier collects every
+    'allowed_hosts' declared in the task into a single union (see
+    ``TaskConfig.declared_allowed_hosts``) and applies it to the agent's
+    commands only — every other process in the container stays offline. The
+    fail direction is closed: 'allowlist' resolves to allow_internet=False, so
+    a host pier cannot enforce per-phase is a host nothing can reach."""
 
     network_mode: NetworkMode | None = Field(
         default=None,
-        description="Network access policy ('no-network' or 'public'). On "
-        "[agent]/[verifier] this is an explicit phase override; on "
-        "[environment] it applies to both phases. When unset everywhere, the "
-        "legacy 'allow_internet' boolean applies.",
+        description="Network access policy ('no-network', 'public' or "
+        "'allowlist'). On [agent]/[verifier] this is an explicit phase "
+        "override; on [environment] it applies to both phases. When unset "
+        "everywhere, the legacy 'allow_internet' boolean applies.",
     )
     allowed_hosts: list[str] | None = Field(
         default=None,
-        description="Unsupported (Harbor allowlist-mode companion field); "
-        "declared only so its presence fails loudly instead of being ignored.",
+        description="Hosts reachable under network_mode='allowlist'. Harbor's "
+        "'*.foo.com' wildcard is normalized to pier's '.foo.com' suffix form "
+        "at parse time; IP literals and CIDR ranges are rejected.",
     )
 
-    @model_validator(mode="after")
-    def _validate_network_policy(self) -> "NetworkPolicyFieldsMixin":
-        if self.network_mode == NetworkMode.ALLOWLIST:
-            raise ValueError(
-                "network_mode='allowlist' is not supported by pier yet; "
-                "use 'no-network' or 'public'."
-            )
-        if self.allowed_hosts is not None:
-            raise ValueError("allowed_hosts is not supported by pier yet.")
-        return self
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _normalize_allowed_hosts(cls, hosts: list[str] | None) -> list[str] | None:
+        return None if hosts is None else normalize_allowed_hosts(hosts)
 
 
 class Author(BaseModel):
@@ -712,7 +714,10 @@ class TaskConfig(BaseModel):
 
         Precedence per phase (mirrors Harbor): explicit [agent]/[verifier]
         override > [environment] scope > legacy ``allow_internet``. 'public'
-        maps to allow_internet=True; 'no-network' to allow_internet=False.
+        maps to allow_internet=True; 'no-network' and 'allowlist' both map to
+        allow_internet=False — an allowlist is enforced on top of a closed
+        environment by the egress proxy, from the hosts collected by
+        ``declared_allowed_hosts``.
 
         Before this resolution existed, pier silently IGNORED network_mode and
         fell back to allow_internet's default of True.
@@ -758,6 +763,26 @@ class TaskConfig(BaseModel):
         for step in self.steps or []:
             _resolve_verifier(step.verifier)
         return self
+
+    def declared_allowed_hosts(self) -> list[str]:
+        """Union of every ``allowed_hosts`` declared anywhere in the task.
+
+        Pier enforces one allowlist for the whole trial rather than Harbor's
+        per-phase allowlists (see :class:`NetworkPolicyFieldsMixin`), so the
+        [environment], [agent], [verifier] and per-step declarations are
+        merged here.
+        """
+        scopes: list[NetworkPolicyFieldsMixin | None] = [
+            self.environment,
+            self.agent,
+            self.verifier,
+            self.verifier.environment,
+        ]
+        for step in self.steps or []:
+            scopes += [step.agent, step.verifier, step.verifier.environment]
+        return sorted(
+            {host for scope in scopes if scope for host in scope.allowed_hosts or []}
+        )
 
     @classmethod
     def model_validate_toml(cls, toml_data: str) -> "TaskConfig":

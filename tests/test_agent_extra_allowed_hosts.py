@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from pier.models.agent.network import NetworkAllowlist
+from pier.models.task.config import TaskConfig
 from pier.models.trial.config import AgentConfig
 from pier.trial.execution import TrialExecution
 
@@ -73,6 +74,37 @@ def test_public_network_policy_warns_and_ignores_extra_hosts():
             agent=_StubAgent("api.anthropic.com"),
             agent_config=AgentConfig(extra_allowed_hosts=["api.example.com"]),
             allow_internet=True,
+        )
+
+    assert allowlist.domains == ["api.anthropic.com"]
+
+
+def test_task_declared_hosts_union_with_derived_and_extra_hosts():
+    task_config = TaskConfig.model_validate_toml(
+        '[environment]\nnetwork_mode = "allowlist"\nallowed_hosts = ["pypi.org"]\n'
+    )
+
+    allowlist = TrialExecution._resolve_network_allowlist(
+        agent=_StubAgent("api.anthropic.com"),
+        agent_config=AgentConfig(extra_allowed_hosts=["*.example.com"]),
+        allow_internet=task_config.environment.allow_internet,
+        task_allowed_hosts=task_config.declared_allowed_hosts(),
+    )
+
+    assert allowlist.domains == [".example.com", "api.anthropic.com", "pypi.org"]
+
+
+def test_public_network_policy_warns_and_ignores_task_hosts():
+    task_config = TaskConfig.model_validate_toml(
+        '[environment]\nnetwork_mode = "public"\nallowed_hosts = ["pypi.org"]\n'
+    )
+
+    with pytest.warns(UserWarning, match="effective network policy is public"):
+        allowlist = TrialExecution._resolve_network_allowlist(
+            agent=_StubAgent("api.anthropic.com"),
+            agent_config=AgentConfig(),
+            allow_internet=task_config.environment.allow_internet,
+            task_allowed_hosts=task_config.declared_allowed_hosts(),
         )
 
     assert allowlist.domains == ["api.anthropic.com"]
