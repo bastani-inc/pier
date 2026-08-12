@@ -82,6 +82,9 @@ def _make_env(mounted: bool) -> AsyncMock:
     env.stop.return_value = None
     env.upload_dir.return_value = None
     env.upload_file.return_value = None
+    # Mirror BaseEnvironment's default (pass the env through untouched) instead
+    # of AsyncMock's coroutine-returning default.
+    env.agent_process_env = MagicMock(side_effect=lambda process_env: process_env)
 
     async def download_dir(source_dir, target_dir):
         target = Path(target_dir)
@@ -116,7 +119,7 @@ def _make_env(mounted: bool) -> AsyncMock:
     return env
 
 
-def _mock_agent() -> MagicMock:
+def _mock_agent(allowlist=None) -> MagicMock:
     return MagicMock(
         name=lambda: "oracle",
         version=lambda: "1.0",
@@ -125,7 +128,7 @@ def _mock_agent() -> MagicMock:
         run=AsyncMock(),
         to_agent_info=lambda: AgentInfo(name="oracle", version="1.0"),
         install_spec=lambda: None,
-        network_allowlist=lambda: None,
+        network_allowlist=lambda: allowlist,
     )
 
 
@@ -155,7 +158,7 @@ def _make_factory_recorder(
     return fake_create, calls
 
 
-async def _run_trial(task_dir, trials_dir, fake_create):
+async def _run_trial(task_dir, trials_dir, fake_create, agent=None):
     config = TrialConfig(
         task=TrialTaskConfig(path=task_dir),
         trials_dir=trials_dir,
@@ -170,7 +173,7 @@ async def _run_trial(task_dir, trials_dir, fake_create):
         ),
         patch(
             "pier.trial.execution.AgentFactory.create_agent_from_config",
-            return_value=_mock_agent(),
+            return_value=agent if agent is not None else _mock_agent(),
         ),
     ):
         trial = await Trial.create(config)

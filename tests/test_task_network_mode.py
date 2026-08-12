@@ -173,6 +173,61 @@ def test_declared_allowed_hosts_unions_every_scope():
     ]
 
 
+def test_verifier_allowed_hosts_excludes_agent_scoped_hosts():
+    cfg = TaskConfig.model_validate_toml(ALLOWLIST_TASK)
+    # [verifier].allowed_hosts only: the explicit [verifier.environment]
+    # declares none, and the agent/[environment] hosts are not the verifier's.
+    assert cfg.verifier_allowed_hosts() == ["pypi.org"]
+
+
+def test_verifier_allowed_hosts_unions_verifier_environment():
+    cfg = TaskConfig.model_validate_toml(ALLOWLIST_TASK)
+    assert cfg.verifier_allowed_hosts(cfg.steps[0]) == ["crates.io", "pypi.org"]
+
+
+def test_verifier_allowed_hosts_includes_materialized_baseline_once():
+    cfg = TaskConfig.model_validate_toml(
+        """
+[verifier]
+environment_mode = "separate"
+network_mode = "allowlist"
+allowed_hosts = ["deps.internal.example"]
+[environment]
+network_mode = "allowlist"
+allowed_hosts = ["files.pythonhosted.org", "deps.internal.example"]
+"""
+    )
+    # The materialized [verifier.environment] is a copy of [environment], so the
+    # baseline hosts apply to the verifier too — deduped, not double-counted.
+    assert cfg.verifier_allowed_hosts() == [
+        "deps.internal.example",
+        "files.pythonhosted.org",
+    ]
+
+
+def test_verifier_allowed_hosts_empty_for_shared_verifier():
+    cfg = TaskConfig.model_validate_toml(
+        """
+[environment]
+network_mode = "allowlist"
+allowed_hosts = ["files.pythonhosted.org"]
+"""
+    )
+    assert cfg.verifier_allowed_hosts() == []
+
+
+def test_verifier_allowed_hosts_empty_when_nothing_declared():
+    cfg = TaskConfig.model_validate_toml(
+        """
+[verifier]
+environment_mode = "separate"
+[environment]
+network_mode = "no-network"
+"""
+    )
+    assert cfg.verifier_allowed_hosts() == []
+
+
 def test_allowed_hosts_normalized_at_parse():
     cfg = TaskConfig.model_validate_toml(
         "[environment]\nallowed_hosts = [\"*.Example.COM.\", \" API.Example.com \"]\n"

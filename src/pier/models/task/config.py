@@ -784,6 +784,35 @@ class TaskConfig(BaseModel):
             {host for scope in scopes if scope for host in scope.allowed_hosts or []}
         )
 
+    def verifier_allowed_hosts(self, step_cfg: "StepConfig | None" = None) -> list[str]:
+        """Hosts reachable from a *separate* verifier environment.
+
+        Scoped tighter than :meth:`declared_allowed_hosts`: only the [verifier]
+        phase override and the environment the verifier actually runs in count.
+        Agent-derived model hosts and run-level ``--allow-agent-host`` extras are
+        deliberately excluded — the verifier has no business reaching the model
+        API, so its sandbox stays tighter than the agent's.
+
+        The effective environment is resolved exactly as the runtime resolves it
+        (step env > task verifier env > a fresh copy of [environment]), so the
+        baseline [environment] hosts are included only when that baseline is what
+        the verifier actually runs in. Returns [] for a shared-environment
+        verifier: it runs inside the agent's container under the agent's
+        allowlist.
+        """
+        # Local import: verifier_mode imports this module.
+        from pier.models.task.verifier_mode import (
+            resolve_effective_verifier_env_config,
+        )
+
+        env_config = resolve_effective_verifier_env_config(self, step_cfg)
+        if env_config is None:
+            return []
+        scopes: list[NetworkPolicyFieldsMixin] = [self.verifier, env_config]
+        if step_cfg is not None:
+            scopes.append(step_cfg.verifier)
+        return sorted({host for scope in scopes for host in scope.allowed_hosts or []})
+
     @classmethod
     def model_validate_toml(cls, toml_data: str) -> "TaskConfig":
         toml_dict = tomllib.loads(toml_data)

@@ -46,6 +46,7 @@ class Verifier:
         skip_tests_upload: bool = False,
         verifier_env: dict[str, str] | None = None,
         step_name: str | None = None,
+        use_proxy_env: bool = False,
     ):
         self._task = task
         self._trial_paths = trial_paths
@@ -55,6 +56,11 @@ class Verifier:
         self._skip_tests_upload = skip_tests_upload
         self._verifier_env = verifier_env
         self._step_name = step_name
+        # Only a separate verifier environment sets this: there the egress
+        # allowlist belongs to the verifier, so its command gets the proxy
+        # variables. A shared verifier runs inside the agent's container, where
+        # the allowlist is the agent's, and stays offline.
+        self._use_proxy_env = use_proxy_env
 
     def _parse_reward_text(self) -> dict[str, float | int]:
         if self._trial_paths.reward_text_path.stat().st_size == 0:
@@ -164,6 +170,9 @@ class Verifier:
                         "API calls."
                     )
             env = resolve_env_vars(merged_env)
+
+        if self._use_proxy_env:
+            env = self._environment.agent_process_env(env)
 
         test_script_path = str(
             env_paths.tests_dir

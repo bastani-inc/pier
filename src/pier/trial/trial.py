@@ -21,6 +21,7 @@ from pier.agents.installed.base import BaseInstalledAgent, NonZeroAgentExitCodeE
 from pier.environments.base import HealthcheckError
 from pier.environments.factory import EnvironmentFactory
 from pier.models.agent.context import AgentContext
+from pier.models.agent.network import NetworkAllowlist
 from pier.models.task.config import (
     EnvironmentConfig as TaskEnvironmentConfig,
 )
@@ -394,6 +395,10 @@ class Trial:
         artifacts_dir: Path,
         artifacts: Sequence[str | ArtifactConfig] | None = None,
     ) -> VerifierResult:
+        # The verifier's own allowlist: [verifier] plus the environment it runs
+        # in, without the agent's model hosts. Empty stays None, which leaves
+        # the sandbox fully offline under a closed network policy.
+        verifier_hosts = self._task.config.verifier_allowed_hosts(step_cfg)
         env = EnvironmentFactory.create_environment_from_config(
             config=self.config.environment,
             environment_dir=self._verifier_env_build_context(step_cfg),
@@ -404,7 +409,9 @@ class Trial:
             logger=self._logger,
             mounts_json=self._verifier_env_mounts(env_config),
             agent_install_spec=None,
-            network_allowlist=None,
+            network_allowlist=(
+                NetworkAllowlist(domains=verifier_hosts) if verifier_hosts else None
+            ),
             default_user=(
                 step_cfg.verifier.user
                 if step_cfg is not None and step_cfg.verifier.user is not None
@@ -434,6 +441,7 @@ class Trial:
                 skip_tests_upload=True,
                 verifier_env=verifier_env,
                 step_name=step_cfg.name if step_cfg is not None else None,
+                use_proxy_env=True,
             )
             return await verifier.verify()
         finally:

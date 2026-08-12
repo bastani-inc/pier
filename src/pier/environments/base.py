@@ -299,10 +299,15 @@ class BaseEnvironment(ABC):
         return merged or None
 
     def agent_process_env(self, env: dict[str, str] | None) -> dict[str, str] | None:
-        """Return environment variables for installed-agent commands.
+        """Return environment variables for the commands the allowlist is for.
 
         Filtered-egress environments override this to scope proxy variables to
-        agent setup/run commands instead of verifier and task commands.
+        the allowlisted phase's commands instead of every command in the
+        container. Despite the name, that phase is the agent only in the agent's
+        environment; in a *separate* verifier environment the allowlist belongs
+        to the verifier, so the verifier command goes through this hook too (see
+        pier.verifier.verifier.Verifier). Name kept for back-compat with
+        environment subclasses that already override it.
         """
         return env
 
