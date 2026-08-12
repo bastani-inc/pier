@@ -104,3 +104,13 @@ model:
     )
 
     assert {"api.openai.com", "gateway.example.com"} <= domains(agent)
+
+
+def test_mini_swe_reports_litellm_cost_map_domain(tmp_path: Path):
+    agent = MiniSweAgent(
+        logs_dir=tmp_path,
+        model_name="xai/grok-4.6",
+        litellm_model_cost_map_url="https://example.com/custom/model_prices.json",
+    )
+
+    assert {"api.x.ai", "example.com"} <= domains(agent)

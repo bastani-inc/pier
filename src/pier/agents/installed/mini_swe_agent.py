@@ -579,6 +579,7 @@ class MiniSweAgent(BaseInstalledAgent):
         model_class: str | None = "auto",
         model_kwargs: dict[str, Any] | None = None,
         extra_python_packages: list[str] | None = None,
+        litellm_model_cost_map_url: str | None = None,
         set_cache_control: str | None = None,
         config_yaml: str | None = None,
         config_file: str | None = None,
@@ -591,6 +592,9 @@ class MiniSweAgent(BaseInstalledAgent):
         self._model_class = model_class
         self._model_kwargs = model_kwargs or {}
         self._extra_python_packages = extra_python_packages or []
+        self._litellm_model_cost_map_url = (
+            litellm_model_cost_map_url or self._LITELLM_MODEL_COST_MAP_URL
+        )
         self._set_cache_control = set_cache_control
         self._config_yaml = config_yaml
         if config_file:
@@ -660,7 +664,7 @@ import sys
 import urllib.request
 from importlib.resources import files
 
-url = "{self._LITELLM_MODEL_COST_MAP_URL}"
+url = {json.dumps(self._litellm_model_cost_map_url)}
 path = files("litellm").joinpath("model_prices_and_context_window_backup.json")
 
 try:
@@ -701,7 +705,7 @@ mini-swe-agent --help
         )
 
     def network_allowlist(self) -> NetworkAllowlist:
-        urls: list[str] = []
+        urls: list[str] = [self._litellm_model_cost_map_url]
         for key in (
             "OPENAI_BASE_URL",
             "OPENAI_API_BASE",

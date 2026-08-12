@@ -16,6 +16,20 @@ def test_mini_swe_install_refreshes_litellm_cost_map_backup(tmp_path: Path):
     assert "model_prices_and_context_window_backup.json" in spec.steps[-1].run
 
 
+def test_mini_swe_install_accepts_litellm_cost_map_url_override(tmp_path: Path):
+    cost_map_url = "https://example.com/custom/model_prices.json"
+    agent = MiniSweAgent(
+        logs_dir=tmp_path,
+        model_name="xai/grok-4.6",
+        litellm_model_cost_map_url=cost_map_url,
+    )
+
+    spec = agent.install_spec()
+
+    assert f'url = "{cost_map_url}"' in spec.steps[-1].run
+    assert MiniSweAgent._LITELLM_MODEL_COST_MAP_URL not in spec.steps[-1].run
+
+
 def test_mini_swe_cost_limit_zero_is_config_override(tmp_path: Path):
     agent = MiniSweAgent(logs_dir=tmp_path, model_name="openai/gpt-5.5")
 
