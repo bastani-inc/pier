@@ -91,6 +91,7 @@ class BaseEnvironment(ABC):
         persistent_env: dict[str, str] | None = None,
         agent_install_spec: AgentInstallSpec | None = None,
         network_allowlist: NetworkAllowlist | None = None,
+        verifier_network_allowlist: NetworkAllowlist | None = None,
         default_user: str | int | None = None,
         *args,
         **kwargs,
@@ -126,6 +127,11 @@ class BaseEnvironment(ABC):
         self._persistent_env: dict[str, str] = persistent_env or {}
         self.agent_install_spec = agent_install_spec
         self.network_allowlist = network_allowlist or NetworkAllowlist()
+        # Hosts a *shared* verifier may reach through its own proxy user. Empty
+        # for every task that does not declare a distinct verifier phase policy.
+        self.verifier_network_allowlist = (
+            verifier_network_allowlist or NetworkAllowlist()
+        )
 
         self.logger = (logger or global_logger).getChild(__name__)
 
@@ -308,6 +314,16 @@ class BaseEnvironment(ABC):
         to the verifier, so the verifier command goes through this hook too (see
         pier.verifier.verifier.Verifier). Name kept for back-compat with
         environment subclasses that already override it.
+        """
+        return env
+
+    def verifier_process_env(self, env: dict[str, str] | None) -> dict[str, str] | None:
+        """Return environment variables for a *shared* verifier's command.
+
+        Filtered-egress environments override this to hand the verifier command
+        the credentials of the proxy's verifier user, so it reaches the hosts
+        the [verifier] scope declares and no others. The agent's credentials
+        never travel this way, and these never reach an agent exec.
         """
         return env
 
@@ -552,6 +568,18 @@ class BaseEnvironment(ABC):
         ):
             raise ValueError(
                 f"Filtered inference egress is not supported by {self.type()} environment."
+            )
+
+        if (
+            not self.verifier_network_allowlist.is_empty
+            and not self.capabilities.phase_scoped_egress
+        ):
+            raise ValueError(
+                "A [verifier] network policy that differs from the agent's "
+                f"requires per-phase egress, which the {self.type()} "
+                "environment does not support. Use "
+                "[verifier].environment_mode='separate' to give the verifier "
+                "its own environment."
             )
 
     def _validate_windows_support(self):

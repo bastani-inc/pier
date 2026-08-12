@@ -47,6 +47,7 @@ class Verifier:
         verifier_env: dict[str, str] | None = None,
         step_name: str | None = None,
         use_proxy_env: bool = False,
+        use_verifier_proxy_env: bool = False,
     ):
         self._task = task
         self._trial_paths = trial_paths
@@ -61,6 +62,10 @@ class Verifier:
         # variables. A shared verifier runs inside the agent's container, where
         # the allowlist is the agent's, and stays offline.
         self._use_proxy_env = use_proxy_env
+        # A shared verifier that declares a network policy of its own sets this
+        # instead: the proxy authenticates it as its own user, so it gets the
+        # verifier credentials and never the agent's.
+        self._use_verifier_proxy_env = use_verifier_proxy_env
 
     def _parse_reward_text(self) -> dict[str, float | int]:
         if self._trial_paths.reward_text_path.stat().st_size == 0:
@@ -173,6 +178,8 @@ class Verifier:
 
         if self._use_proxy_env:
             env = self._environment.agent_process_env(env)
+        elif self._use_verifier_proxy_env:
+            env = self._environment.verifier_process_env(env)
 
         test_script_path = str(
             env_paths.tests_dir

@@ -220,6 +220,9 @@ class TrialExecution:
         agent,
         agent_config: AgentConfig,
     ) -> BaseEnvironment:
+        # Hosts that belong to a shared verifier phase alone. They stay out of
+        # the agent's allowlist and reach the container as a second proxy user.
+        shared_verifier_hosts = task.config.shared_verifier_proxy_hosts()
         return EnvironmentFactory.create_environment_from_config(
             config=environment_config,
             environment_dir=task.paths.environment_dir,
@@ -233,7 +236,12 @@ class TrialExecution:
                 agent=agent,
                 agent_config=agent_config,
                 allow_internet=task.config.environment.allow_internet,
-                task_allowed_hosts=task.config.declared_allowed_hosts(),
+                task_allowed_hosts=task.config.agent_allowed_hosts(),
+            ),
+            verifier_network_allowlist=(
+                NetworkAllowlist.from_entries(shared_verifier_hosts)
+                if shared_verifier_hosts
+                else None
             ),
             default_user=task.config.agent.user,
         )

@@ -95,7 +95,7 @@ def test_task_declared_hosts_union_with_derived_and_extra_hosts():
         agent=_StubAgent("api.anthropic.com"),
         agent_config=AgentConfig(extra_allowed_hosts=["*.example.com"]),
         allow_internet=task_config.environment.allow_internet,
-        task_allowed_hosts=task_config.declared_allowed_hosts(),
+        task_allowed_hosts=task_config.agent_allowed_hosts(),
     )
 
     assert allowlist.domains == [".example.com", "api.anthropic.com", "pypi.org"]
@@ -122,7 +122,7 @@ def test_public_network_policy_warns_and_ignores_task_hosts():
             agent=_StubAgent("api.anthropic.com"),
             agent_config=AgentConfig(),
             allow_internet=task_config.environment.allow_internet,
-            task_allowed_hosts=task_config.declared_allowed_hosts(),
+            task_allowed_hosts=task_config.agent_allowed_hosts(),
         )
 
     assert allowlist.domains == ["api.anthropic.com"]

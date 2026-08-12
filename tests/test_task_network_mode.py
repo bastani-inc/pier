@@ -162,15 +162,29 @@ def test_allowlist_agent_override_beats_public_environment():
     assert cfg.environment.allow_internet is False
 
 
-def test_declared_allowed_hosts_unions_every_scope():
+def test_agent_allowed_hosts_excludes_hosts_owned_by_a_verifier_phase():
     cfg = TaskConfig.model_validate_toml(ALLOWLIST_TASK)
-    assert cfg.declared_allowed_hosts() == [
+    # 'pypi.org' and 'crates.io' belong to verify passes that run in their own
+    # environment, so they are the verifier's hosts, not the agent's.
+    assert cfg.agent_allowed_hosts() == [
         ".example.com",
-        "crates.io",
         "files.pythonhosted.org",
-        "pypi.org",
         "step.example.org",
     ]
+
+
+def test_agent_allowed_hosts_unions_verifier_scopes_without_a_phase_policy():
+    cfg = TaskConfig.model_validate_toml(
+        """
+[verifier]
+allowed_hosts = ["pypi.org"]
+[environment]
+network_mode = "allowlist"
+allowed_hosts = ["files.pythonhosted.org"]
+"""
+    )
+    # Shared verifier with no policy of its own: pier's historical single union.
+    assert cfg.agent_allowed_hosts() == ["files.pythonhosted.org", "pypi.org"]
 
 
 def test_verifier_allowed_hosts_excludes_agent_scoped_hosts():

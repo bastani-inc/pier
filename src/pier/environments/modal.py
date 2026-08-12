@@ -15,6 +15,8 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from pier.environments.agent_setup import (
     EGRESS_PROXY_PORT,
     dockerfile_install_commands,
+    PROXY_VERIFIER_USER,
+    merge_proxy_env,
     new_proxy_token,
     proxy_environment,
     proxy_policy_env,
@@ -845,6 +847,7 @@ class ModalEnvironment(BaseEnvironment):
             gpus=True,
             disable_internet=not self._compose_mode,
             filtered_egress=not self._compose_mode,
+            phase_scoped_egress=not self._compose_mode,
             preinstall_agents=not self._compose_mode,
             docker_compose=True,
         )
@@ -865,6 +868,7 @@ class ModalEnvironment(BaseEnvironment):
         self._sandbox: Sandbox | None = None
         self._egress_proxy_sandbox: Sandbox | None = None
         self._egress_proxy_env: dict[str, str] = {}
+        self._verifier_proxy_env: dict[str, str] = {}
         self._egress_cidr_allowlist: list[str] | None = None
         self._secrets = secrets or []
         self._registry_secret = registry_secret
@@ -948,12 +952,10 @@ class ModalEnvironment(BaseEnvironment):
         return secrets
 
     def agent_process_env(self, env: dict[str, str] | None) -> dict[str, str] | None:
-        if not self._egress_proxy_env:
-            return env
-        merged = dict(self._egress_proxy_env)
-        if env:
-            merged.update(env)
-        return merged or None
+        return merge_proxy_env(self._egress_proxy_env, env)
+
+    def verifier_process_env(self, env: dict[str, str] | None) -> dict[str, str] | None:
+        return merge_proxy_env(self._verifier_proxy_env, env)
 
     def _volumes_config(self) -> dict[str, Volume]:
         return {
@@ -978,7 +980,10 @@ class ModalEnvironment(BaseEnvironment):
 
     async def _ensure_egress_proxy(self) -> None:
         allowlist = self.network_allowlist
-        if self.task_env_config.allow_internet or allowlist.is_empty:
+        verifier_allowlist = self.verifier_network_allowlist
+        if self.task_env_config.allow_internet or (
+            allowlist.is_empty and verifier_allowlist.is_empty
+        ):
             return
         if self._compose_mode:
             raise ValueError(
@@ -988,6 +993,7 @@ class ModalEnvironment(BaseEnvironment):
             return
 
         token = new_proxy_token()
+        verifier_token = None if verifier_allowlist.is_empty else new_proxy_token()
         proxy_image = Image.debian_slim(python_version="3.12").apt_install(
             "apache2-utils",
             "ca-certificates",
@@ -996,10 +1002,10 @@ class ModalEnvironment(BaseEnvironment):
         self._egress_proxy_sandbox = await Sandbox.create.aio(
             "sh",
             "-c",
-            squid_bootstrap_command(allowlist),
+            squid_bootstrap_command(allowlist, verifier_allowlist),
             app=self._app,
             image=proxy_image,
-            env=proxy_policy_env(allowlist, token),
+            env=proxy_policy_env(allowlist, token, verifier_allowlist, verifier_token),
             unencrypted_ports=[EGRESS_PROXY_PORT],
             readiness_probe=modal.sandbox.Probe.with_tcp(EGRESS_PROXY_PORT),
             timeout=self._sandbox_timeout,
@@ -1018,6 +1024,10 @@ class ModalEnvironment(BaseEnvironment):
         proxy_ip = self._resolve_ipv4(proxy_host)
         self._egress_cidr_allowlist = [f"{proxy_ip}/32"]
         self._egress_proxy_env = proxy_environment(token, proxy_host, proxy_port)
+        if verifier_token is not None:
+            self._verifier_proxy_env = proxy_environment(
+                verifier_token, proxy_host, proxy_port, user=PROXY_VERIFIER_USER
+            )
 
     async def _teardown_egress_proxy(self) -> None:
         if self._egress_proxy_sandbox is None:
@@ -1030,6 +1040,7 @@ class ModalEnvironment(BaseEnvironment):
         finally:
             self._egress_proxy_sandbox = None
             self._egress_proxy_env = {}
+            self._verifier_proxy_env = {}
             self._egress_cidr_allowlist = None
 
     @retry(

@@ -25,6 +25,15 @@ class EnvironmentCapabilities(BaseModel):
     filtered_egress: bool = False
     """Whether the environment can allow only declared outbound inference hosts."""
 
+    phase_scoped_egress: bool = False
+    """Whether one container can enforce different allowlists per phase.
+
+    True for the proxy-based environments (docker, modal): the egress proxy
+    authenticates the agent and a shared verifier as separate users, so each
+    phase gets its own hosts. False where the allowlist is applied to the whole
+    sandbox (daytona), which cannot tell the phases apart.
+    """
+
     preinstall_agents: bool = False
     """Whether the environment can install selected agents at image build time."""
 

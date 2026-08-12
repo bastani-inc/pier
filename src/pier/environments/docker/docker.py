@@ -14,6 +14,8 @@ from pydantic import BaseModel
 from pier.environments.agent_setup import (
     EGRESS_PROXY_PORT,
     EGRESS_PROXY_SERVICE,
+    PROXY_VERIFIER_USER,
+    merge_proxy_env,
     new_proxy_token,
     proxy_environment,
     write_agent_dockerfile,
@@ -201,6 +203,7 @@ class DockerEnvironment(BaseEnvironment):
         self._agent_build_context_dir: Path | None = None
         self._egress_proxy_compose_path: Path | None = None
         self._egress_proxy_env: dict[str, str] = {}
+        self._verifier_proxy_env: dict[str, str] = {}
 
         install_fingerprint = (
             f"__agent-{self.agent_install_spec.fingerprint()}"
@@ -278,6 +281,7 @@ class DockerEnvironment(BaseEnvironment):
         return EnvironmentCapabilities(
             disable_internet=True,
             filtered_egress=True,
+            phase_scoped_egress=True,
             preinstall_agents=True,
             windows=True,
             mounted=True,
@@ -388,7 +392,10 @@ class DockerEnvironment(BaseEnvironment):
 
     def _prepare_egress_proxy_compose(self) -> None:
         allowlist = self.network_allowlist
-        if self.task_env_config.allow_internet or allowlist.is_empty:
+        verifier_allowlist = self.verifier_network_allowlist
+        if self.task_env_config.allow_internet or (
+            allowlist.is_empty and verifier_allowlist.is_empty
+        ):
             return
         if self._uses_compose:
             raise ValueError(
@@ -399,20 +406,29 @@ class DockerEnvironment(BaseEnvironment):
         self._egress_proxy_env = proxy_environment(
             token, EGRESS_PROXY_SERVICE, EGRESS_PROXY_PORT
         )
+        verifier_token: str | None = None
+        if not verifier_allowlist.is_empty:
+            verifier_token = new_proxy_token()
+            self._verifier_proxy_env = proxy_environment(
+                verifier_token,
+                EGRESS_PROXY_SERVICE,
+                EGRESS_PROXY_PORT,
+                user=PROXY_VERIFIER_USER,
+            )
         self._egress_proxy_compose_path = write_docker_proxy_compose(
             path=self.trial_paths.trial_dir / "docker-compose-egress-proxy.json",
             proxy_dir=self.trial_paths.trial_dir / "egress-proxy",
             allowlist=allowlist,
             token=token,
+            verifier_allowlist=verifier_allowlist,
+            verifier_token=verifier_token,
         )
 
     def agent_process_env(self, env: dict[str, str] | None) -> dict[str, str] | None:
-        if not self._egress_proxy_env:
-            return env
-        merged = dict(self._egress_proxy_env)
-        if env:
-            merged.update(env)
-        return merged or None
+        return merge_proxy_env(self._egress_proxy_env, env)
+
+    def verifier_process_env(self, env: dict[str, str] | None) -> dict[str, str] | None:
+        return merge_proxy_env(self._verifier_proxy_env, env)
 
     def _write_mounts_compose_file(self) -> Path:
         """Write a docker-compose override file with additional volume mounts."""

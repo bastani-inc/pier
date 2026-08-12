@@ -51,12 +51,13 @@ class NetworkPolicyFieldsMixin(BaseModel):
     PhaseNetworkPolicyConfig equivalent).
 
     Pier deviates from Harbor on 'allowlist'. Harbor scopes an allowlist to the
-    phase that declares it and enforces it container-wide; pier collects every
-    'allowed_hosts' declared in the task into a single union (see
-    ``TaskConfig.declared_allowed_hosts``) and applies it to the agent's
-    commands only — every other process in the container stays offline. The
-    fail direction is closed: 'allowlist' resolves to allow_internet=False, so
-    a host pier cannot enforce per-phase is a host nothing can reach."""
+    phase that declares it and enforces it container-wide; pier resolves one
+    allowlist per phase (see ``TaskConfig.agent_allowed_hosts``,
+    ``verifier_allowed_hosts`` and ``shared_verifier_allowed_hosts``) and
+    applies each to that phase's commands only — every other process in the
+    container stays offline. The fail direction is closed: 'allowlist' resolves
+    to allow_internet=False, so a host pier cannot enforce per-phase is a host
+    nothing can reach."""
 
     network_mode: NetworkMode | None = Field(
         default=None,
@@ -718,7 +719,7 @@ class TaskConfig(BaseModel):
         maps to allow_internet=True; 'no-network' and 'allowlist' both map to
         allow_internet=False — an allowlist is enforced on top of a closed
         environment by the egress proxy, from the hosts collected by
-        ``declared_allowed_hosts``.
+        ``agent_allowed_hosts`` and ``shared_verifier_allowed_hosts``.
 
         Before this resolution existed, pier silently IGNORED network_mode and
         fell back to allow_internet's default of True.
@@ -750,14 +751,24 @@ class TaskConfig(BaseModel):
                 verifier.network_mode is not None
                 and agent_mode is not None
                 and verifier.network_mode != agent_mode
+                and NetworkMode.PUBLIC in (verifier.network_mode, agent_mode)
             ):
                 # Shared-environment verifier: it runs in the agent's container,
-                # so a conflicting explicit override cannot be enforced.
+                # so the container's kernel-level route is the agent's. Two
+                # *restricted* modes still work — the egress proxy tells the
+                # phases apart by proxy user (see
+                # ``shared_verifier_allowed_hosts``) — but a 'public' phase
+                # cannot be mixed with a restricted one: the container either
+                # has a real route to the internet or it does not.
                 raise ValueError(
-                    "[verifier].network_mode conflicts with the agent "
-                    "environment's resolved network policy but the verifier "
-                    "shares that environment; use environment_mode='separate' "
-                    "to give the verifier its own network policy."
+                    f"[verifier].network_mode={verifier.network_mode.value!r} "
+                    "conflicts with the agent environment's resolved network "
+                    f"policy {agent_mode.value!r} but the verifier shares that "
+                    "environment. A shared verifier supports only restricted "
+                    "combinations of 'no-network' and 'allowlist' (any mix); a "
+                    "'public' phase cannot be mixed with a restricted one. Use "
+                    "[verifier].environment_mode='separate' to give the "
+                    "verifier its own network policy."
                 )
 
         _resolve_verifier(self.verifier)
@@ -765,30 +776,103 @@ class TaskConfig(BaseModel):
             _resolve_verifier(step.verifier)
         return self
 
-    def declared_allowed_hosts(self) -> list[str]:
-        """Union of every ``allowed_hosts`` declared anywhere in the task.
+    def _verifier_phases(self) -> list["StepConfig | None"]:
+        """Every verify pass the task declares, as ``step_cfg`` arguments."""
+        return [None, *(self.steps or [])]
 
-        Pier enforces one allowlist for the whole trial rather than Harbor's
-        per-phase allowlists (see :class:`NetworkPolicyFieldsMixin`), so the
-        [environment], [agent], [verifier] and per-step declarations are
-        merged here.
+    def _verifier_scope_hosts(self, step_cfg: "StepConfig | None") -> set[str]:
+        """``allowed_hosts`` declared by the scopes one verify pass owns."""
+        verifier = step_cfg.verifier if step_cfg is not None else self.verifier
+        scopes: list[NetworkPolicyFieldsMixin | None] = [verifier, verifier.environment]
+        return {host for scope in scopes if scope for host in scope.allowed_hosts or []}
+
+    def agent_allowed_hosts(self) -> list[str]:
+        """Hosts reachable from the agent phase.
+
+        The [environment] and [agent] scopes always count. Verifier scopes join
+        them only for verify passes that have no policy of their own — pier's
+        historical single-allowlist union (see :class:`NetworkPolicyFieldsMixin`),
+        kept so tasks that declare hosts under [verifier] without a verifier
+        network policy resolve exactly as before. When a verify pass *does* have
+        its own policy (a separate verifier environment, or a shared verifier
+        with its own proxy user), its hosts belong to that phase alone and are
+        withheld from the agent.
         """
-        scopes: list[NetworkPolicyFieldsMixin | None] = [
-            self.environment,
-            self.agent,
-            self.verifier,
-            self.verifier.environment,
-        ]
+        scopes: list[NetworkPolicyFieldsMixin | None] = [self.environment, self.agent]
         for step in self.steps or []:
-            scopes += [step.agent, step.verifier, step.verifier.environment]
+            scopes.append(step.agent)
+        hosts = {
+            host for scope in scopes if scope for host in scope.allowed_hosts or []
+        }
+        for step_cfg in self._verifier_phases():
+            if self._verifier_phase_has_own_hosts(step_cfg):
+                continue
+            hosts |= self._verifier_scope_hosts(step_cfg)
+        return sorted(hosts)
+
+    def _verifier_phase_has_own_hosts(self, step_cfg: "StepConfig | None") -> bool:
+        """True when one verify pass enforces an allowlist of its own."""
+        return bool(
+            self.verifier_allowed_hosts(step_cfg)
+            or self.shared_verifier_allowed_hosts(step_cfg)
+        )
+
+    def shared_verifier_allowed_hosts(
+        self, step_cfg: "StepConfig | None" = None
+    ) -> list[str]:
+        """Hosts reachable from a *shared* verifier phase, via its proxy user.
+
+        A shared verifier runs inside the agent's container, so a policy of its
+        own is enforceable only by the egress proxy authenticating the verifier
+        command as a second proxy user (see
+        :func:`pier.environments.agent_setup.squid_bootstrap_command`).
+
+        Non-empty only when the verifier declares an explicit ``network_mode``
+        of 'allowlist' that *differs* from the agent's resolved mode, plus
+        hosts. That is exactly the set of declarations that used to fail to
+        parse, so no task that runs today gains or loses proxy credentials:
+        when the two phases resolve to the same mode the verifier keeps its
+        historical behaviour (offline inside the agent's container, its hosts
+        folded into :meth:`agent_allowed_hosts`).
+        """
+        # Local import: verifier_mode imports this module.
+        from pier.models.task.verifier_mode import (
+            resolve_effective_verifier_env_config,
+        )
+
+        if resolve_effective_verifier_env_config(self, step_cfg) is not None:
+            return []  # Separate environment: verifier_allowed_hosts() owns it.
+        verifier = step_cfg.verifier if step_cfg is not None else self.verifier
+        agent_mode = self.environment.network_mode
+        if (
+            verifier.network_mode is not NetworkMode.ALLOWLIST
+            or agent_mode is None
+            or verifier.network_mode == agent_mode
+        ):
+            return []
+        scopes: list[NetworkPolicyFieldsMixin] = [self.verifier]
+        if step_cfg is not None:
+            scopes.append(step_cfg.verifier)
+        return sorted({host for scope in scopes for host in scope.allowed_hosts or []})
+
+    def shared_verifier_proxy_hosts(self) -> list[str]:
+        """Union of every shared verify pass's own hosts.
+
+        The proxy topology is fixed for the whole run, so all shared verify
+        passes share one proxy user and therefore one allowlist.
+        """
         return sorted(
-            {host for scope in scopes if scope for host in scope.allowed_hosts or []}
+            {
+                host
+                for step_cfg in self._verifier_phases()
+                for host in self.shared_verifier_allowed_hosts(step_cfg)
+            }
         )
 
     def verifier_allowed_hosts(self, step_cfg: "StepConfig | None" = None) -> list[str]:
         """Hosts reachable from a *separate* verifier environment.
 
-        Scoped tighter than :meth:`declared_allowed_hosts`: only the [verifier]
+        Scoped tighter than :meth:`agent_allowed_hosts`: only the [verifier]
         phase override and the environment the verifier actually runs in count.
         Agent-derived model hosts and run-level ``--allow-agent-host`` extras are
         deliberately excluded — the verifier has no business reaching the model

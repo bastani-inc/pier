@@ -369,6 +369,11 @@ class Trial:
                 logger=self._logger,
                 verifier_env=verifier_env,
                 step_name=step_cfg.name if step_cfg is not None else None,
+                # Credentials for the proxy's verifier user, and only when this
+                # verify pass has a network policy of its own to enforce.
+                use_verifier_proxy_env=bool(
+                    self._task.config.shared_verifier_allowed_hosts(step_cfg)
+                ),
             )
             return await verifier.verify()
 

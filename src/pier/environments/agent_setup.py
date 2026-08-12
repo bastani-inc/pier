@@ -11,6 +11,11 @@ from pier.models.agent.network import NetworkAllowlist
 AGENT_INSTALL_DIR = ".pier-agent-install"
 EGRESS_PROXY_SERVICE = "pier-egress-proxy"
 EGRESS_PROXY_PORT = 8080
+# Proxy users. The agent phase always authenticates as PROXY_AGENT_USER; a
+# shared verifier with a network policy of its own gets PROXY_VERIFIER_USER,
+# with its own token and its own ACL files (see squid_bootstrap_command).
+PROXY_AGENT_USER = "agent"
+PROXY_VERIFIER_USER = "verifier"
 
 
 def docker_run_command(script: str) -> str:
@@ -78,9 +83,12 @@ def write_agent_dockerfile(
 
 
 def proxy_environment(
-    token: str, host: str, port: int = EGRESS_PROXY_PORT
+    token: str,
+    host: str,
+    port: int = EGRESS_PROXY_PORT,
+    user: str = PROXY_AGENT_USER,
 ) -> dict[str, str]:
-    proxy_url = f"http://agent:{token}@{host}:{port}"
+    proxy_url = f"http://{user}:{token}@{host}:{port}"
     return {
         "HTTP_PROXY": proxy_url,
         "HTTPS_PROXY": proxy_url,
@@ -95,24 +103,67 @@ def new_proxy_token() -> str:
     return secrets.token_urlsafe(24)
 
 
-def squid_bootstrap_command(allowlist: NetworkAllowlist) -> str:
-    """Build the proxy bootstrap script for one allowlist.
+def squid_bootstrap_command(
+    allowlist: NetworkAllowlist,
+    verifier_allowlist: NetworkAllowlist | None = None,
+) -> str:
+    """Build the proxy bootstrap script for one or two phase allowlists.
 
     The allowlist values travel in the environment (see :func:`proxy_policy_env`),
     but the ACL lines are baked in here: squid warns about an ACL pointed at an
     empty file and such an ACL matches nothing, so a rule is emitted only when
     its side of the allowlist has entries.
+
+    ``verifier_allowlist`` is the policy of a *shared* verifier that has one of
+    its own. When it has entries, a second htpasswd user is provisioned with its
+    own token and its own ACL files, and every ``http_access allow`` line is
+    scoped to the proxy user it belongs to, so neither phase can reach the
+    other's hosts. With no verifier entries the script is byte-for-byte the
+    single-user script pier has always generated.
     """
+    verifier_hosts = verifier_allowlist or NetworkAllowlist()
+    two_users = not verifier_hosts.is_empty
     acls: list[str] = []
     rules: list[str] = []
+    agent_acl = "authenticated"
+    if two_users:
+        # Squid warns about ACLs no rule references, so the agent's user ACL is
+        # emitted only when the agent phase has hosts of its own to allow.
+        agent_acl = "agent_user"
+        if not allowlist.is_empty:
+            acls.append(f"acl {agent_acl} proxy_auth {PROXY_AGENT_USER}")
+        acls.append(f"acl verifier_user proxy_auth {PROXY_VERIFIER_USER}")
     if allowlist.domains:
         acls.append('acl allowed_domains dstdomain "/tmp/allowed_domains.txt"')
-        rules.append("http_access allow authenticated allowed_domains")
+        rules.append(f"http_access allow {agent_acl} allowed_domains")
     if allowlist.ip_entries:
         acls.append('acl allowed_ips dst "/tmp/allowed_ips.txt"')
-        rules.append("http_access allow authenticated allowed_ips")
+        rules.append(f"http_access allow {agent_acl} allowed_ips")
+    if verifier_hosts.domains:
+        acls.append(
+            'acl allowed_domains_verifier dstdomain "/tmp/allowed_domains_verifier.txt"'
+        )
+        rules.append("http_access allow verifier_user allowed_domains_verifier")
+    if verifier_hosts.ip_entries:
+        acls.append('acl allowed_ips_verifier dst "/tmp/allowed_ips_verifier.txt"')
+        rules.append("http_access allow verifier_user allowed_ips_verifier")
     acl_block = "\n".join(acls)
     rule_block = "\n".join(rules)
+    verifier_files = ""
+    verifier_htpasswd = ""
+    if two_users:
+        verifier_files = (
+            "\n"
+            + r"""printf '%s' "$VERIFIER_ALLOWLIST_DOMAINS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' \
+  > /tmp/allowed_domains_verifier.txt
+printf '%s' "$VERIFIER_ALLOWLIST_IPS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' \
+  > /tmp/allowed_ips_verifier.txt
+"""
+        )
+        verifier_htpasswd = (
+            f"\nhtpasswd -b /tmp/squid.passwd {PROXY_VERIFIER_USER} "
+            '"$VERIFIER_PROXY_TOKEN"'
+        )
     return rf"""#!/usr/bin/env bash
 set -eu
 
@@ -120,8 +171,8 @@ printf '%s' "$ALLOWLIST_DOMAINS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' \
   > /tmp/allowed_domains.txt
 printf '%s' "$ALLOWLIST_IPS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' \
   > /tmp/allowed_ips.txt
-
-htpasswd -bc /tmp/squid.passwd agent "$PROXY_TOKEN"
+{verifier_files}
+htpasswd -bc /tmp/squid.passwd {PROXY_AGENT_USER} "$PROXY_TOKEN"{verifier_htpasswd}
 
 cat > /tmp/squid.conf <<'EOF'
 http_port 0.0.0.0:8080
@@ -153,12 +204,36 @@ exec squid -N -f /tmp/squid.conf -d 1
 """
 
 
-def proxy_policy_env(allowlist: NetworkAllowlist, token: str) -> dict[str, str]:
-    return {
+def proxy_policy_env(
+    allowlist: NetworkAllowlist,
+    token: str,
+    verifier_allowlist: NetworkAllowlist | None = None,
+    verifier_token: str | None = None,
+) -> dict[str, str]:
+    env = {
         "PROXY_TOKEN": token,
         "ALLOWLIST_DOMAINS": ",".join(allowlist.domains),
         "ALLOWLIST_IPS": ",".join(allowlist.ip_entries),
     }
+    if verifier_token is not None and verifier_allowlist is not None:
+        env |= {
+            "VERIFIER_PROXY_TOKEN": verifier_token,
+            "VERIFIER_ALLOWLIST_DOMAINS": ",".join(verifier_allowlist.domains),
+            "VERIFIER_ALLOWLIST_IPS": ",".join(verifier_allowlist.ip_entries),
+        }
+    return env
+
+
+def merge_proxy_env(
+    proxy_env: dict[str, str] | None, env: dict[str, str] | None
+) -> dict[str, str] | None:
+    """Layer a phase's proxy variables under its per-exec environment."""
+    if not proxy_env:
+        return env
+    merged = dict(proxy_env)
+    if env:
+        merged.update(env)
+    return merged or None
 
 
 def write_docker_proxy_compose(
@@ -167,6 +242,8 @@ def write_docker_proxy_compose(
     proxy_dir: Path,
     allowlist: NetworkAllowlist,
     token: str,
+    verifier_allowlist: NetworkAllowlist | None = None,
+    verifier_token: str | None = None,
 ) -> Path:
     proxy_dir.mkdir(parents=True, exist_ok=True)
     (proxy_dir / "Dockerfile").write_text(
@@ -184,7 +261,9 @@ def write_docker_proxy_compose(
             ]
         )
     )
-    (proxy_dir / "start-squid.sh").write_text(squid_bootstrap_command(allowlist))
+    (proxy_dir / "start-squid.sh").write_text(
+        squid_bootstrap_command(allowlist, verifier_allowlist)
+    )
     compose = {
         "services": {
             "main": {
@@ -197,7 +276,9 @@ def write_docker_proxy_compose(
             },
             EGRESS_PROXY_SERVICE: {
                 "build": {"context": str(proxy_dir.resolve().absolute())},
-                "environment": proxy_policy_env(allowlist, token),
+                "environment": proxy_policy_env(
+                    allowlist, token, verifier_allowlist, verifier_token
+                ),
                 "healthcheck": {
                     "test": ["CMD-SHELL", "bash -lc '</dev/tcp/127.0.0.1/8080'"],
                     "interval": "1s",

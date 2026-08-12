@@ -148,7 +148,7 @@ def test_task_toml_ip_entries_reach_the_run_allowlist():
         agent=_StubAgent(),
         agent_config=AgentConfig(extra_allowed_hosts=["192.0.2.0/24"]),
         allow_internet=task_config.environment.allow_internet,
-        task_allowed_hosts=task_config.declared_allowed_hosts(),
+        task_allowed_hosts=task_config.agent_allowed_hosts(),
     )
 
     assert allowlist.domains == ["api.anthropic.com", "pypi.org"]

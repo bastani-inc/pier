@@ -85,6 +85,7 @@ def _make_env(mounted: bool) -> AsyncMock:
     # Mirror BaseEnvironment's default (pass the env through untouched) instead
     # of AsyncMock's coroutine-returning default.
     env.agent_process_env = MagicMock(side_effect=lambda process_env: process_env)
+    env.verifier_process_env = MagicMock(side_effect=lambda process_env: process_env)
 
     async def download_dir(source_dir, target_dir):
         target = Path(target_dir)
