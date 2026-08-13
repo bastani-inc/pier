@@ -57,10 +57,8 @@ class Verifier:
         self._skip_tests_upload = skip_tests_upload
         self._verifier_env = verifier_env
         self._step_name = step_name
-        # Only a separate verifier environment sets this: there the egress
-        # allowlist belongs to the verifier, so its command gets the proxy
-        # variables. A shared verifier runs inside the agent's container, where
-        # the allowlist is the agent's, and stays offline.
+        # A separate verifier or a shared verifier inheriting the agent
+        # baseline uses the environment's primary proxy credentials.
         self._use_proxy_env = use_proxy_env
         # A shared verifier that declares a network policy of its own sets this
         # instead: the proxy authenticates it as its own user, so it gets the
@@ -145,7 +143,7 @@ class Verifier:
             (VerifierResult): The result of the verifier.
         """
         env_paths = self._environment.env_paths
-        task_os = self._task.config.environment.os
+        task_os = self._environment.task_os
         test_source_dirs, tests_source_dir, host_test_path = self._resolve_tests()
 
         if not self._skip_tests_upload:
@@ -221,10 +219,10 @@ class Verifier:
                     "Failed to download verifier directory from environment"
                 ) from e
 
-        if self._trial_paths.reward_text_path.exists():
-            rewards = self._parse_reward_text()
-        elif self._trial_paths.reward_json_path.exists():
+        if self._trial_paths.reward_json_path.exists():
             rewards = self._parse_reward_json()
+        elif self._trial_paths.reward_text_path.exists():
+            rewards = self._parse_reward_text()
         else:
             raise RewardFileNotFoundError(
                 f"No reward file found at {self._trial_paths.reward_text_path} or {

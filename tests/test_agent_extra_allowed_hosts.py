@@ -29,7 +29,7 @@ def test_harbor_wildcard_becomes_pier_suffix():
     assert config.extra_allowed_hosts == [".example.com", "api.example.com"]
 
 
-def test_duplicate_entries_collapse():
+def test_legacy_pier_suffix_remains_accepted_and_duplicates_collapse():
     config = AgentConfig(extra_allowed_hosts=["*.example.com", ".example.com"])
 
     assert config.extra_allowed_hosts == [".example.com"]
@@ -59,7 +59,7 @@ def test_extra_hosts_union_with_agent_derived_allowlist():
         agent_config=AgentConfig(
             extra_allowed_hosts=["*.example.com", "api.anthropic.com"]
         ),
-        allow_internet=False,
+        has_public_network=False,
     )
 
     assert allowlist.domains == [".example.com", "api.anthropic.com"]
@@ -69,7 +69,7 @@ def test_agent_allowlist_passes_through_without_extra_hosts():
     allowlist = TrialExecution._resolve_network_allowlist(
         agent=_StubAgent("api.anthropic.com"),
         agent_config=AgentConfig(),
-        allow_internet=False,
+        has_public_network=False,
     )
 
     assert allowlist.domains == ["api.anthropic.com"]
@@ -80,7 +80,7 @@ def test_public_network_policy_warns_and_ignores_extra_hosts():
         allowlist = TrialExecution._resolve_network_allowlist(
             agent=_StubAgent("api.anthropic.com"),
             agent_config=AgentConfig(extra_allowed_hosts=["api.example.com"]),
-            allow_internet=True,
+            has_public_network=True,
         )
 
     assert allowlist.domains == ["api.anthropic.com"]
@@ -94,7 +94,7 @@ def test_task_declared_hosts_union_with_derived_and_extra_hosts():
     allowlist = TrialExecution._resolve_network_allowlist(
         agent=_StubAgent("api.anthropic.com"),
         agent_config=AgentConfig(extra_allowed_hosts=["*.example.com"]),
-        allow_internet=task_config.environment.allow_internet,
+        has_public_network=task_config.environment.has_public_network,
         task_allowed_hosts=task_config.agent_allowed_hosts(),
     )
 
@@ -105,23 +105,23 @@ def test_extra_ip_entries_reach_the_run_allowlist():
     allowlist = TrialExecution._resolve_network_allowlist(
         agent=_StubAgent("api.anthropic.com"),
         agent_config=AgentConfig(extra_allowed_hosts=["10.0.0.0/8", "203.0.113.7"]),
-        allow_internet=False,
+        has_public_network=False,
     )
 
     assert allowlist.domains == ["api.anthropic.com"]
     assert allowlist.ip_entries == ["10.0.0.0/8", "203.0.113.7"]
 
 
-def test_public_network_policy_warns_and_ignores_task_hosts():
+def test_public_network_policy_warns_and_ignores_run_hosts():
     task_config = TaskConfig.model_validate_toml(
-        '[environment]\nnetwork_mode = "public"\nallowed_hosts = ["pypi.org"]\n'
+        '[environment]\nnetwork_mode = "public"\n'
     )
 
     with pytest.warns(UserWarning, match="effective network policy is public"):
         allowlist = TrialExecution._resolve_network_allowlist(
             agent=_StubAgent("api.anthropic.com"),
-            agent_config=AgentConfig(),
-            allow_internet=task_config.environment.allow_internet,
+            agent_config=AgentConfig(extra_allowed_hosts=["pypi.org"]),
+            has_public_network=task_config.environment.has_public_network,
             task_allowed_hosts=task_config.agent_allowed_hosts(),
         )
 

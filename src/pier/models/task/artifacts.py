@@ -72,6 +72,15 @@ def with_convention_entry(
     return normalized
 
 
+def sidecar_services(entries: Sequence[str | ArtifactConfig]) -> set[str]:
+    """Names of non-main services referenced by artifact entries."""
+    return {
+        effective_artifact_service(artifact)
+        for artifact in normalize_artifact_entries(entries)
+        if effective_artifact_service(artifact) != MAIN_SERVICE_NAME
+    }
+
+
 def _paths_overlap(a: str, b: str) -> bool:
     """True when two container paths are equal or one contains the other."""
     path_a = PurePosixPath(a.rstrip("/") or "/")
@@ -88,7 +97,7 @@ def validate_artifact_entries(
 
     Overlapping sources or destinations do not raise: since all services
     share one flat artifacts base dir, overlapping entries simply collide on
-    the same host path, and the later entry overwrites the earlier one. We
+    the same host path, and a later entry may overwrite the earlier one. We
     surface a load-time warning so the overlap is visible up front.
     """
     full = with_convention_entry(entries, convention_source=convention_source)
@@ -102,8 +111,8 @@ def validate_artifact_entries(
             "Artifact sources overlap: "
             f"{first.source!r} (service {first_service!r}) and "
             f"{second.source!r} (service {second_service!r}) map to the same "
-            "location under the shared artifacts dir; on collision the first is "
-            "kept and the rest are skipped at collection time.",
+            "location under the shared artifacts dir; a later collection may "
+            "overwrite the earlier one.",
             UserWarning,
             stacklevel=2,
         )
@@ -116,7 +125,7 @@ def validate_artifact_entries(
             warnings.warn(
                 f"Artifact destinations overlap: {first_dest!r} and "
                 f"{second_dest!r} map to the same location under the artifacts "
-                "dir; on collision the first is kept and the rest are skipped.",
+                "dir; a later collection may overwrite the earlier one.",
                 UserWarning,
                 stacklevel=2,
             )

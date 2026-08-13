@@ -88,10 +88,10 @@ def test_ip_entries_field_rejects_hostnames():
         NetworkAllowlist(ip_entries=["api.example.com"])
 
 
-def test_normalize_allowed_hosts_returns_hostnames_then_ip_entries():
+def test_normalize_allowed_hosts_preserves_harbor_order_and_wildcards():
     assert normalize_allowed_hosts(["10.0.0.0/8", "*.example.com"]) == [
-        ".example.com",
         "10.0.0.0/8",
+        "*.example.com",
     ]
 
 
@@ -147,7 +147,7 @@ def test_task_toml_ip_entries_reach_the_run_allowlist():
     allowlist = TrialExecution._resolve_network_allowlist(
         agent=_StubAgent(),
         agent_config=AgentConfig(extra_allowed_hosts=["192.0.2.0/24"]),
-        allow_internet=task_config.environment.allow_internet,
+        has_public_network=task_config.environment.has_public_network,
         task_allowed_hosts=task_config.agent_allowed_hosts(),
     )
 

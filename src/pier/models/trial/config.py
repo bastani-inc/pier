@@ -14,7 +14,7 @@ from pydantic import (
 from shortuuid import ShortUUID
 
 from pier.models.agent.name import AgentName
-from pier.models.agent.network import normalize_allowed_hosts
+from pier.models.agent.network import normalize_pier_allowed_hosts
 from pier.models.environment_type import EnvironmentType
 from pier.models.task.config import ArtifactConfig
 from pier.models.task.id import GitTaskId, LocalTaskId, PackageTaskId
@@ -64,14 +64,13 @@ class AgentConfig(BaseModel):
         default_factory=list,
         description="Run-specific hostnames, IP addresses or CIDR ranges merged "
         "into the agent's inference allowlist for the agent phase. Accepts "
-        "Harbor's '*.foo.com' wildcard spelling and normalizes it to pier's "
-        "'.foo.com' suffix form.",
+        "Harbor's '*.foo.com' wildcard spelling.",
     )
 
     @field_validator("extra_allowed_hosts")
     @classmethod
     def _normalize_extra_allowed_hosts(cls, hosts: list[str]) -> list[str]:
-        return normalize_allowed_hosts(hosts)
+        return normalize_pier_allowed_hosts(hosts)
 
     @field_serializer("env")
     @classmethod

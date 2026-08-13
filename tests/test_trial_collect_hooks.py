@@ -28,7 +28,7 @@ def run_async(fn):
 
 def _fake_trial(hooks: list[VerifierCollectConfig]) -> SimpleNamespace:
     environment = AsyncMock()
-    environment.exec.return_value = SimpleNamespace(return_code=0)
+    environment.service_exec.return_value = SimpleNamespace(return_code=0)
     return SimpleNamespace(
         _task=SimpleNamespace(
             config=SimpleNamespace(verifier=VerifierConfig(collect=hooks))
@@ -42,7 +42,7 @@ def _fake_trial(hooks: list[VerifierCollectConfig]) -> SimpleNamespace:
 async def test_no_hooks_is_a_noop() -> None:
     trial = _fake_trial([])
     await Trial._run_collect_hooks(trial)
-    trial._environment.exec.assert_not_awaited()
+    trial._environment.service_exec.assert_not_awaited()
 
 
 @run_async
@@ -54,8 +54,9 @@ async def test_hook_is_executed() -> None:
     )
     trial = _fake_trial([hook])
     await Trial._run_collect_hooks(trial)
-    trial._environment.exec.assert_awaited_once_with(
-        command="echo hi > /logs/artifacts/out.txt",
+    trial._environment.service_exec.assert_awaited_once_with(
+        "echo hi > /logs/artifacts/out.txt",
+        service="main",
         timeout_sec=120,
         user="root",
     )
@@ -69,28 +70,30 @@ async def test_step_hooks_run_after_task_hooks() -> None:
     step_cfg = StepConfig(name="grade", verifier=VerifierConfig(collect=[step_hook]))
     await Trial._run_collect_hooks(trial, step_cfg)
     commands = [
-        call.kwargs["command"] for call in trial._environment.exec.await_args_list
+        call.args[0] for call in trial._environment.service_exec.await_args_list
     ]
     assert commands == ["task-hook", "step-hook"]
 
 
 @run_async
-async def test_sidecar_hook_is_skipped() -> None:
+async def test_sidecar_hook_targets_its_service() -> None:
     hook = VerifierCollectConfig(command="pg_dump app", service="postgres")
     trial = _fake_trial([hook])
     await Trial._run_collect_hooks(trial)
-    trial._environment.exec.assert_not_awaited()
+    trial._environment.service_exec.assert_awaited_once_with(
+        "pg_dump app", service="postgres", timeout_sec=60, user=None
+    )
 
 
 @run_async
 async def test_nonzero_exit_does_not_raise() -> None:
     trial = _fake_trial([VerifierCollectConfig(command="exit 3")])
-    trial._environment.exec.return_value = SimpleNamespace(return_code=3)
+    trial._environment.service_exec.return_value = SimpleNamespace(return_code=3)
     await Trial._run_collect_hooks(trial)  # must not raise
 
 
 @run_async
 async def test_exec_exception_is_swallowed() -> None:
     trial = _fake_trial([VerifierCollectConfig(command="boom")])
-    trial._environment.exec.side_effect = RuntimeError("env died")
+    trial._environment.service_exec.side_effect = RuntimeError("env died")
     await Trial._run_collect_hooks(trial)  # must not raise

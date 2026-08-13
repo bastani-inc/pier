@@ -129,11 +129,11 @@ async def test_separate_verifier_command_gets_proxy_env():
 
 
 @run_async
-async def test_shared_verifier_command_gets_no_proxy_env():
+async def test_shared_verifier_command_inherits_baseline_proxy_env():
     with tempfile.TemporaryDirectory() as tmp:
         calls, agent_env = await _run(Path(tmp), SHARED_ALLOWLIST_TOML, [])
 
         assert len(calls) == 1  # no separate verifier env was created
-        agent_env.agent_process_env.assert_not_called()
+        agent_env.agent_process_env.assert_called_once_with(None)
         exec_envs = [call.kwargs.get("env") for call in agent_env.exec.await_args_list]
         assert all(env is None or "HTTP_PROXY" not in env for env in exec_envs)

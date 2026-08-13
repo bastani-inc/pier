@@ -1,289 +1,156 @@
-"""network_mode (Harbor >= 0.18 schema) must resolve onto allow_internet.
+"""Harbor 1.4 task network schema compatibility."""
 
-Regression tests for the air-gap escape where pier silently ignored
-``network_mode = "no-network"`` and defaulted to allow_internet=True.
-'allowlist' resolves the same closed way and additionally collects the task's
-``allowed_hosts`` for the egress proxy.
-"""
+import warnings
 
 import pytest
 from pydantic import ValidationError
 
 from pier.models.task.config import NetworkMode, TaskConfig
 
-V11_STYLE = """
-schema_version = "1.3"
-[verifier]
+
+def test_environment_defaults_to_public() -> None:
+    config = TaskConfig.model_validate_toml("")
+    assert config.environment.network_mode is NetworkMode.PUBLIC
+    assert config.environment.allow_internet is None
+
+
+@pytest.mark.parametrize(
+    ("legacy", "expected"),
+    [(False, NetworkMode.NO_NETWORK), (True, NetworkMode.PUBLIC)],
+)
+def test_legacy_allow_internet_migrates_without_serializing(
+    legacy: bool, expected: NetworkMode
+) -> None:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        config = TaskConfig.model_validate_toml(
+            f"[environment]\nallow_internet = {str(legacy).lower()}\n"
+        )
+    assert config.environment.network_mode is expected
+    assert config.environment.allow_internet is None
+    assert "allow_internet" not in config.model_dump_toml()
+    assert any(issubclass(item.category, DeprecationWarning) for item in caught)
+
+
+def test_phase_overrides_do_not_mutate_environment_baseline() -> None:
+    config = TaskConfig.model_validate_toml(
+        """
+[environment]
 network_mode = "no-network"
-environment_mode = "separate"
-timeout_sec = 1800.0
-[verifier.environment]
-build_timeout_sec = 1800.0
 [agent]
-network_mode = "no-network"
-timeout_sec = 5400.0
-[environment]
-docker_image = "example/image:tag"
-"""
-
-
-def test_v11_no_network_resolves_to_no_internet():
-    cfg = TaskConfig.model_validate_toml(V11_STYLE)
-    assert cfg.environment.allow_internet is False
-    assert cfg.environment.network_mode is NetworkMode.NO_NETWORK
-    assert cfg.verifier.environment is not None
-    assert cfg.verifier.environment.allow_internet is False
-
-
-def test_public_mode_allows_internet():
-    cfg = TaskConfig.model_validate_toml("[environment]\nnetwork_mode = \"public\"\n")
-    assert cfg.environment.allow_internet is True
-
-
-def test_task_wide_mode_applies_to_explicit_verifier_environment():
-    cfg = TaskConfig.model_validate_toml(
-        """
-[verifier]
-environment_mode = "separate"
-[verifier.environment]
-docker_image = "example/verifier:tag"
-[environment]
-network_mode = "no-network"
-docker_image = "example/image:tag"
-"""
-    )
-    assert cfg.environment.allow_internet is False
-    assert cfg.verifier.environment.allow_internet is False
-
-
-def test_step_verifier_inherits_task_wide_mode():
-    cfg = TaskConfig.model_validate_toml(
-        """
-[environment]
-network_mode = "no-network"
-docker_image = "example/image:tag"
-[[steps]]
-name = "one"
-[steps.verifier]
-environment_mode = "separate"
-[steps.verifier.environment]
-docker_image = "example/verifier:tag"
-"""
-    )
-    assert cfg.steps[0].verifier.environment.allow_internet is False
-
-
-def test_agent_override_beats_environment_scope():
-    cfg = TaskConfig.model_validate_toml(
-        """
-[agent]
-network_mode = "no-network"
-[environment]
 network_mode = "public"
+[verifier]
+network_mode = "allowlist"
+allowed_hosts = ["pypi.org"]
 """
     )
-    assert cfg.environment.allow_internet is False
+    assert config.environment.network_mode is NetworkMode.NO_NETWORK
+    assert config.agent.network_mode is NetworkMode.PUBLIC
+    assert config.verifier.network_mode is NetworkMode.ALLOWLIST
 
 
-def test_shared_verifier_conflicting_override_rejected():
-    with pytest.raises(ValidationError):
+def test_separate_verifier_environment_has_its_own_public_default() -> None:
+    config = TaskConfig.model_validate_toml(
+        """
+[environment]
+network_mode = "no-network"
+[verifier.environment]
+cpus = 1
+"""
+    )
+    assert config.environment.network_mode is NetworkMode.NO_NETWORK
+    assert config.verifier.environment is not None
+    assert config.verifier.environment.network_mode is NetworkMode.PUBLIC
+
+
+@pytest.mark.parametrize(
+    "section",
+    ["agent", "verifier", "environment"],
+)
+def test_allowed_hosts_require_allowlist_mode(section: str) -> None:
+    with pytest.raises(ValidationError, match="only valid"):
         TaskConfig.model_validate_toml(
-            """
-[agent]
-network_mode = "no-network"
-[verifier]
-network_mode = "public"
-[environment]
-docker_image = "example/image:tag"
-"""
+            f'[{section}]\nnetwork_mode = "public"\nallowed_hosts = ["pypi.org"]\n'
         )
 
 
-def test_separate_verifier_override_materializes_environment():
-    cfg = TaskConfig.model_validate_toml(
-        """
-[verifier]
-network_mode = "no-network"
-environment_mode = "separate"
-[environment]
-network_mode = "public"
-docker_image = "example/image:tag"
-"""
+def test_allowed_hosts_without_mode_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="only valid"):
+        TaskConfig.model_validate_toml('[agent]\nallowed_hosts = ["pypi.org"]\n')
+
+
+def test_allowlist_may_be_empty() -> None:
+    config = TaskConfig.model_validate_toml(
+        '[environment]\nnetwork_mode = "allowlist"\n'
     )
-    assert cfg.environment.allow_internet is True
-    assert cfg.verifier.environment is not None
-    assert cfg.verifier.environment.allow_internet is False
+    assert config.environment.allowed_hosts is None
+    assert config.environment.resolve_baseline().allowed_hosts == []
 
 
-def test_legacy_allow_internet_still_honored():
-    cfg = TaskConfig.model_validate_toml("[environment]\nallow_internet = false\n")
-    assert cfg.environment.allow_internet is False
-    cfg = TaskConfig.model_validate_toml("[environment]\n")
-    assert cfg.environment.allow_internet is True  # unchanged legacy default
-
-
-ALLOWLIST_TASK = """
+def test_allowed_hosts_match_harbor_normalization() -> None:
+    config = TaskConfig.model_validate_toml(
+        """
 [agent]
 network_mode = "allowlist"
-allowed_hosts = ["*.Example.com"]
-[verifier]
-environment_mode = "separate"
-allowed_hosts = ["pypi.org"]
-[verifier.environment]
-docker_image = "example/verifier:tag"
-[environment]
-network_mode = "allowlist"
-allowed_hosts = ["files.pythonhosted.org", "*.example.com"]
-docker_image = "example/image:tag"
-[[steps]]
-name = "one"
-[steps.agent]
-allowed_hosts = ["step.example.org"]
-[steps.verifier]
-environment_mode = "separate"
-[steps.verifier.environment]
-allowed_hosts = ["crates.io"]
-"""
-
-
-def test_allowlist_mode_resolves_to_no_internet():
-    cfg = TaskConfig.model_validate_toml(ALLOWLIST_TASK)
-    assert cfg.environment.network_mode is NetworkMode.ALLOWLIST
-    assert cfg.environment.allow_internet is False
-    assert cfg.verifier.environment.allow_internet is False
-    assert cfg.steps[0].verifier.environment.allow_internet is False
-
-
-def test_allowlist_agent_override_beats_public_environment():
-    cfg = TaskConfig.model_validate_toml(
-        "[agent]\nnetwork_mode = \"allowlist\"\n"
-        "[environment]\nnetwork_mode = \"public\"\n"
-    )
-    assert cfg.environment.allow_internet is False
-
-
-def test_agent_allowed_hosts_excludes_hosts_owned_by_a_verifier_phase():
-    cfg = TaskConfig.model_validate_toml(ALLOWLIST_TASK)
-    # 'pypi.org' and 'crates.io' belong to verify passes that run in their own
-    # environment, so they are the verifier's hosts, not the agent's.
-    assert cfg.agent_allowed_hosts() == [
-        ".example.com",
-        "files.pythonhosted.org",
-        "step.example.org",
-    ]
-
-
-def test_agent_allowed_hosts_unions_verifier_scopes_without_a_phase_policy():
-    cfg = TaskConfig.model_validate_toml(
-        """
-[verifier]
-allowed_hosts = ["pypi.org"]
-[environment]
-network_mode = "allowlist"
-allowed_hosts = ["files.pythonhosted.org"]
+allowed_hosts = ["*.IANA.org.", "2001:0DB8::1", "192.0.2.0/24"]
 """
     )
-    # Shared verifier with no policy of its own: pier's historical single union.
-    assert cfg.agent_allowed_hosts() == ["files.pythonhosted.org", "pypi.org"]
-
-
-def test_verifier_allowed_hosts_excludes_agent_scoped_hosts():
-    cfg = TaskConfig.model_validate_toml(ALLOWLIST_TASK)
-    # [verifier].allowed_hosts only: the explicit [verifier.environment]
-    # declares none, and the agent/[environment] hosts are not the verifier's.
-    assert cfg.verifier_allowed_hosts() == ["pypi.org"]
-
-
-def test_verifier_allowed_hosts_unions_verifier_environment():
-    cfg = TaskConfig.model_validate_toml(ALLOWLIST_TASK)
-    assert cfg.verifier_allowed_hosts(cfg.steps[0]) == ["crates.io", "pypi.org"]
-
-
-def test_verifier_allowed_hosts_includes_materialized_baseline_once():
-    cfg = TaskConfig.model_validate_toml(
-        """
-[verifier]
-environment_mode = "separate"
-network_mode = "allowlist"
-allowed_hosts = ["deps.internal.example"]
-[environment]
-network_mode = "allowlist"
-allowed_hosts = ["files.pythonhosted.org", "deps.internal.example"]
-"""
-    )
-    # The materialized [verifier.environment] is a copy of [environment], so the
-    # baseline hosts apply to the verifier too — deduped, not double-counted.
-    assert cfg.verifier_allowed_hosts() == [
-        "deps.internal.example",
-        "files.pythonhosted.org",
-    ]
-
-
-def test_verifier_allowed_hosts_empty_for_shared_verifier():
-    cfg = TaskConfig.model_validate_toml(
-        """
-[environment]
-network_mode = "allowlist"
-allowed_hosts = ["files.pythonhosted.org"]
-"""
-    )
-    assert cfg.verifier_allowed_hosts() == []
-
-
-def test_verifier_allowed_hosts_empty_when_nothing_declared():
-    cfg = TaskConfig.model_validate_toml(
-        """
-[verifier]
-environment_mode = "separate"
-[environment]
-network_mode = "no-network"
-"""
-    )
-    assert cfg.verifier_allowed_hosts() == []
-
-
-def test_allowed_hosts_normalized_at_parse():
-    cfg = TaskConfig.model_validate_toml(
-        "[environment]\nallowed_hosts = [\"*.Example.COM.\", \" API.Example.com \"]\n"
-    )
-    assert cfg.environment.allowed_hosts == [".example.com", "api.example.com"]
-
-
-def test_allowed_hosts_accepts_ips_and_cidrs():
-    cfg = TaskConfig.model_validate_toml(
-        "[environment]\nallowed_hosts = "
-        '["10.0.0.0/8", "api.example.com", "2001:0DB8::0001"]\n'
-    )
-    # Hostnames sort ahead of the canonicalized IP entries.
-    assert cfg.environment.allowed_hosts == [
-        "api.example.com",
-        "10.0.0.0/8",
+    assert config.agent.allowed_hosts == [
+        "*.iana.org",
         "2001:db8::1",
+        "192.0.2.0/24",
     ]
 
 
 @pytest.mark.parametrize(
-    "host", ["10.0.0.1:443", "https://10.0.0.1", "*.10.0.0.1", "10.0.0.1/24"]
+    "host",
+    [
+        "https://pypi.org/simple",
+        "pypi.org:443",
+        "fe80::1%eth0",
+        "192.0.2.1/24",
+        "*",
+        "pypi.*",
+        "api.*.pypi.org",
+        "*pypi.org",
+        "*.1.1.1.1",
+        ".example.com",
+        "bad host.example",
+    ],
 )
-def test_allowed_hosts_rejects_malformed_ip_entries(host: str):
-    with pytest.raises(ValidationError):
-        TaskConfig.model_validate_toml(f"[environment]\nallowed_hosts = [\"{host}\"]\n")
-
-
-def test_shared_verifier_conflicting_allowlist_override_rejected():
+def test_invalid_allowed_hosts_are_rejected(host: str) -> None:
     with pytest.raises(ValidationError):
         TaskConfig.model_validate_toml(
-            """
-[agent]
-network_mode = "allowlist"
-[verifier]
-network_mode = "public"
-[environment]
-docker_image = "example/image:tag"
-"""
+            f'[agent]\nnetwork_mode = "allowlist"\nallowed_hosts = ["{host}"]\n'
         )
 
 
-def test_unknown_network_mode_rejected():
-    with pytest.raises(ValidationError):
-        TaskConfig.model_validate_toml("[agent]\nnetwork_mode = \"offline\"\n")
+def test_valid_dynamic_multistep_policy_parses_without_rewriting() -> None:
+    config = TaskConfig.model_validate_toml(
+        """
+[environment]
+network_mode = "public"
+[[steps]]
+name = "offline"
+[steps.agent]
+network_mode = "no-network"
+[steps.verifier]
+network_mode = "public"
+"""
+    )
+    step = config.steps[0]
+    assert config.environment.network_mode is NetworkMode.PUBLIC
+    assert step.agent.network_mode is NetworkMode.NO_NETWORK
+    assert step.verifier.network_mode is NetworkMode.PUBLIC
+
+
+def test_network_policy_round_trip() -> None:
+    config = TaskConfig.model_validate_toml(
+        """
+[environment]
+network_mode = "allowlist"
+allowed_hosts = ["example.com", "*.example.com"]
+"""
+    )
+    reparsed = TaskConfig.model_validate_toml(config.model_dump_toml())
+    assert reparsed.model_dump(mode="json") == config.model_dump(mode="json")

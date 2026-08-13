@@ -545,11 +545,12 @@ class BaseEnvironment(ABC):
             ValueError: If internet isolation is requested but not supported.
         """
         if (
-            not self.task_env_config.allow_internet
+            not self.task_env_config.has_public_network
             and not self.capabilities.disable_internet
         ):
             raise ValueError(
-                f"allow_internet=False is not supported by {self.type()} environment."
+                f"network_mode={self.task_env_config.network_mode.value!r} is not "
+                f"supported by {self.type()} environment."
             )
 
     def _validate_agent_setup_options(self):
@@ -562,7 +563,7 @@ class BaseEnvironment(ABC):
             )
 
         if (
-            not self.task_env_config.allow_internet
+            not self.task_env_config.has_public_network
             and not self.network_allowlist.is_empty
             and not self.capabilities.filtered_egress
         ):

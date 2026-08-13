@@ -65,7 +65,9 @@ except ImportError:
 if TYPE_CHECKING:
     from daytona import CreateSandboxFromImageParams, CreateSandboxFromSnapshotParams
 
-_SandboxParams = Union["CreateSandboxFromImageParams", "CreateSandboxFromSnapshotParams"]
+_SandboxParams = Union[
+    "CreateSandboxFromImageParams", "CreateSandboxFromSnapshotParams"
+]
 
 DAYTONA_MAX_NETWORK_ALLOWLIST_CIDRS = 10
 
@@ -314,7 +316,9 @@ class _DaytonaDirect(_DaytonaStrategy):
         snapshot_name: str | None = None
         snapshot_exists = False
         if env._snapshot_template_name:
-            snapshot_name = env._snapshot_template_name.format(name=env.environment_name)
+            snapshot_name = env._snapshot_template_name.format(
+                name=env.environment_name
+            )
             try:
                 snapshot = await daytona.snapshot.get(snapshot_name)
                 snapshot_exists = snapshot.state == SnapshotState.ACTIVE
@@ -355,7 +359,9 @@ class _DaytonaDirect(_DaytonaStrategy):
                 **kwargs,
             )
         else:
-            image = env._with_agent_install(Image.base(env.task_env_config.docker_image))
+            image = env._with_agent_install(
+                Image.base(env.task_env_config.docker_image)
+            )
             kwargs = {
                 "image": image,
                 "auto_delete_interval": env._auto_delete_interval,
@@ -908,7 +914,7 @@ class DaytonaEnvironment(BaseEnvironment):
             disable_internet=True,
             filtered_egress=True,
             preinstall_agents=not self._compose_mode,
-            docker_compose=True,
+            docker_compose=False,
         )
 
     @classmethod
@@ -927,6 +933,8 @@ class DaytonaEnvironment(BaseEnvironment):
         return self.environment_dir / "docker-compose.yaml"
 
     def _validate_definition(self) -> None:
+        if self.task_env_config.docker_image:
+            return
         path = (
             self._environment_docker_compose_path
             if self._compose_mode
@@ -953,16 +961,16 @@ class DaytonaEnvironment(BaseEnvironment):
             return {"network_block_all": False, "network_allow_list": allow_list}
 
         if self._explicit_network_block_all is not None:
-            expected = not self.task_env_config.allow_internet
+            expected = not self.task_env_config.has_public_network
             if self._explicit_network_block_all != expected:
                 self.logger.warning(
-                    "network_block_all=%s overrides task config allow_internet=%s",
+                    "network_block_all=%s overrides task public-network policy=%s",
                     self._explicit_network_block_all,
-                    self.task_env_config.allow_internet,
+                    self.task_env_config.has_public_network,
                 )
             return {"network_block_all": self._explicit_network_block_all}
 
-        if self.task_env_config.allow_internet:
+        if self.task_env_config.has_public_network:
             return {"network_block_all": False}
 
         if self.network_allowlist.is_empty:
@@ -1073,7 +1081,7 @@ class DaytonaEnvironment(BaseEnvironment):
             )
 
     def _compose_should_block_main_network(self) -> bool:
-        if self.task_env_config.allow_internet:
+        if self.task_env_config.has_public_network:
             return False
         if self._explicit_network_block_all is False:
             return False
@@ -1180,7 +1188,9 @@ class DaytonaEnvironment(BaseEnvironment):
 
         command = f"{shell} {shlex.quote(command)}"
         if env:
-            env_args = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
+            env_args = " ".join(
+                f"{key}={shlex.quote(value)}" for key, value in env.items()
+            )
             command = f"env {env_args} {command}"
         if timeout_sec:
             command = f"timeout {timeout_sec} {command}"

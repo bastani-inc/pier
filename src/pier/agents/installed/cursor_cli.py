@@ -678,11 +678,13 @@ class CursorCli(BaseInstalledAgent):
 
     def _build_no_internet_cli_config_command(self) -> str:
         config = shlex.quote(json.dumps(self._no_internet_cli_config(), indent=2))
-        return f"mkdir -p ~/.cursor && printf '%s\n' {config} > ~/.cursor/cli-config.json"
+        return (
+            f"mkdir -p ~/.cursor && printf '%s\n' {config} > ~/.cursor/cli-config.json"
+        )
 
     @staticmethod
     def _should_disable_web_tools(environment: BaseEnvironment) -> bool:
-        return not environment.task_env_config.allow_internet
+        return not environment.task_env_config.has_public_network
 
     @with_prompt_template
     async def run(

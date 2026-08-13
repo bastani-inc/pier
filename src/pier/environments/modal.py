@@ -416,7 +416,7 @@ class _ModalDinD(_ModalStrategy):
             f"{self._COMPOSE_DIR}/{build_or_prebuilt}",
             f"{self._ENVIRONMENT_DIR}/docker-compose.yaml",
         ]
-        if not self._env.task_env_config.allow_internet:
+        if not self._env.task_env_config.has_public_network:
             files.append(f"{self._COMPOSE_DIR}/docker-compose-no-network.yaml")
 
         # Modal sandboxes lack netlink permissions for creating veth pairs,
@@ -849,7 +849,7 @@ class ModalEnvironment(BaseEnvironment):
             filtered_egress=not self._compose_mode,
             phase_scoped_egress=not self._compose_mode,
             preinstall_agents=not self._compose_mode,
-            docker_compose=True,
+            docker_compose=False,
         )
         self._kwargs = kwargs
         if not _HAS_MODAL:
@@ -981,7 +981,7 @@ class ModalEnvironment(BaseEnvironment):
     async def _ensure_egress_proxy(self) -> None:
         allowlist = self.network_allowlist
         verifier_allowlist = self.verifier_network_allowlist
-        if self.task_env_config.allow_internet or (
+        if self.task_env_config.has_public_network or (
             allowlist.is_empty and verifier_allowlist.is_empty
         ):
             return
@@ -1067,7 +1067,7 @@ class ModalEnvironment(BaseEnvironment):
         """
         if block_network is None:
             block_network = (
-                not self.task_env_config.allow_internet
+                not self.task_env_config.has_public_network
                 and not self._egress_cidr_allowlist
             )
 

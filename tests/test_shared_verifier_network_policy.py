@@ -14,7 +14,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pydantic import ValidationError
 
 from pier.environments.agent_setup import (
     EGRESS_PROXY_SERVICE,
@@ -236,12 +235,15 @@ def test_squid_config_denies_cache_manager_to_proxy_users(verifier_allowlist):
 
 
 def _shared_task(agent_mode: str, verifier_mode: str) -> str:
+    verifier_hosts = (
+        'allowed_hosts = ["pypi.org"]' if verifier_mode == "allowlist" else ""
+    )
     return f"""
 [agent]
 network_mode = "{agent_mode}"
 [verifier]
 network_mode = "{verifier_mode}"
-allowed_hosts = ["pypi.org"]
+{verifier_hosts}
 [environment]
 docker_image = "example/image:tag"
 """
@@ -253,14 +255,7 @@ RESTRICTED = ["no-network", "allowlist"]
 @pytest.mark.parametrize("agent_mode", RESTRICTED + ["public"])
 @pytest.mark.parametrize("verifier_mode", RESTRICTED + ["public"])
 def test_shared_verifier_parse_matrix(agent_mode: str, verifier_mode: str):
-    toml = _shared_task(agent_mode, verifier_mode)
-    public_sides = [agent_mode == "public", verifier_mode == "public"]
-
-    if any(public_sides) and not all(public_sides):
-        with pytest.raises(ValidationError, match="environment_mode='separate'"):
-            TaskConfig.model_validate_toml(toml)
-    else:
-        TaskConfig.model_validate_toml(toml)
+    TaskConfig.model_validate_toml(_shared_task(agent_mode, verifier_mode))
 
 
 def test_shared_verifier_allowlist_hosts_are_the_verifier_phase_only():
@@ -269,7 +264,7 @@ def test_shared_verifier_allowlist_hosts_are_the_verifier_phase_only():
     assert cfg.shared_verifier_allowed_hosts() == ["pypi.org"]
     assert cfg.shared_verifier_proxy_hosts() == ["pypi.org"]
     assert cfg.agent_allowed_hosts() == []
-    assert cfg.environment.allow_internet is False
+    assert cfg.environment.network_mode.value == "public"
 
 
 def test_no_network_verifier_phase_gets_no_credentials():
@@ -289,21 +284,17 @@ docker_image = "example/image:tag"
     assert cfg.agent_allowed_hosts() == ["api.example.com"]
 
 
-def test_same_mode_shared_verifier_keeps_the_historical_single_allowlist():
+def test_matching_shared_verifier_uses_the_baseline_allowlist():
     cfg = TaskConfig.model_validate_toml(
         """
-[agent]
-network_mode = "allowlist"
-[verifier]
-network_mode = "allowlist"
-allowed_hosts = ["pypi.org"]
 [environment]
+network_mode = "allowlist"
 allowed_hosts = ["api.example.com"]
 """
     )
 
     assert cfg.shared_verifier_proxy_hosts() == []
-    assert cfg.agent_allowed_hosts() == ["api.example.com", "pypi.org"]
+    assert cfg.agent_allowed_hosts() == ["api.example.com"]
 
 
 def test_step_verifier_phase_owns_its_hosts():
@@ -324,6 +315,33 @@ allowed_hosts = ["crates.io"]
     assert cfg.agent_allowed_hosts() == []
 
 
+def test_multistep_proxy_omits_fully_overridden_task_defaults():
+    cfg = TaskConfig.model_validate_toml(
+        """
+[environment]
+network_mode = "no-network"
+[agent]
+network_mode = "allowlist"
+allowed_hosts = ["unused-agent.example"]
+[verifier]
+network_mode = "allowlist"
+allowed_hosts = ["unused-verifier.example"]
+
+[[steps]]
+name = "one"
+[steps.agent]
+network_mode = "allowlist"
+allowed_hosts = ["step-agent.example"]
+[steps.verifier]
+network_mode = "allowlist"
+allowed_hosts = ["step-verifier.example"]
+"""
+    )
+
+    assert cfg.agent_allowed_hosts() == ["step-agent.example"]
+    assert cfg.shared_verifier_proxy_hosts() == ["step-verifier.example"]
+
+
 # --------------------------------------------------------------------------
 # Environment wiring.
 # --------------------------------------------------------------------------
@@ -333,7 +351,7 @@ def _docker_env(tmp_path: Path, allowlist, verifier_allowlist) -> DockerEnvironm
     env = DockerEnvironment.__new__(DockerEnvironment)
     env.network_allowlist = allowlist
     env.verifier_network_allowlist = verifier_allowlist
-    env.task_env_config = type("TaskEnv", (), {"allow_internet": False})()
+    env.task_env_config = type("TaskEnv", (), {"has_public_network": False})()
     env.trial_paths = SimpleNamespace(trial_dir=tmp_path)
     env.environment_dir = tmp_path / "environment"  # Dockerfile task, no compose
     env._egress_proxy_env = {}
@@ -397,7 +415,7 @@ def test_environment_without_phase_scoped_egress_rejects_the_policy():
     env = DaytonaEnvironment.__new__(DaytonaEnvironment)
     env._compose_mode = False
     env.agent_install_spec = None
-    env.task_env_config = type("TaskEnv", (), {"allow_internet": False})()
+    env.task_env_config = type("TaskEnv", (), {"has_public_network": False})()
     env.network_allowlist = NetworkAllowlist()
     env.verifier_network_allowlist = VERIFIER_ALLOWLIST
     env.logger = logging.getLogger("test")
@@ -434,6 +452,7 @@ allowed_hosts = ["deps.internal.example"]
 """
 
 VERIFIER_PROXY_URL = "http://verifier:secret@pier-egress-proxy:8080"
+AGENT_PROXY_URL = "http://agent:secret@pier-egress-proxy:8080"
 
 
 def _task(tmp: Path, toml: str) -> Path:
@@ -458,6 +477,10 @@ async def _run(tmp: Path, toml: str):
     agent_env.verifier_process_env.side_effect = lambda process_env: {
         **(process_env or {}),
         "HTTP_PROXY": VERIFIER_PROXY_URL,
+    }
+    agent_env.agent_process_env.side_effect = lambda process_env: {
+        **(process_env or {}),
+        "HTTP_PROXY": AGENT_PROXY_URL,
     }
     fake_create, calls = _make_factory_recorder(agent_env, [])
     await _run_trial(
@@ -489,11 +512,14 @@ async def test_shared_verifier_policy_reaches_the_environment_and_the_command():
 
 
 @run_async
-async def test_same_mode_shared_verifier_gets_no_proxy_env():
+async def test_shared_verifier_inherits_baseline_proxy_env():
     with tempfile.TemporaryDirectory() as tmp:
         calls, agent_env = await _run(Path(tmp), SAME_MODE_SHARED_TOML)
 
         assert calls[0].get("verifier_network_allowlist") is None
         agent_env.verifier_process_env.assert_not_called()
         exec_envs = [call.kwargs.get("env") for call in agent_env.exec.await_args_list]
-        assert all(env is None or "HTTP_PROXY" not in env for env in exec_envs)
+        assert any(
+            env is not None and env.get("HTTP_PROXY") == AGENT_PROXY_URL
+            for env in exec_envs
+        )

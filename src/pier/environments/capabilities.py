@@ -44,7 +44,11 @@ class EnvironmentCapabilities(BaseModel):
     """Whether the environment mounts log directories as host filesystems."""
 
     docker_compose: bool = False
-    """Whether the environment can run Docker Compose task environments."""
+    """Whether the environment supports per-service operations for Compose.
+
+    Providers setting this flag must support executing in and downloading from
+    an individual service, as required by sidecar artifacts and collect hooks.
+    """
 
 
 class EnvironmentResourceCapabilities(BaseModel):

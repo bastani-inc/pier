@@ -22,12 +22,15 @@ from pier.environments.base import HealthcheckError
 from pier.environments.factory import EnvironmentFactory
 from pier.models.agent.context import AgentContext
 from pier.models.agent.network import NetworkAllowlist
+from pier.models.task.artifacts import sidecar_services
 from pier.models.task.config import (
     EnvironmentConfig as TaskEnvironmentConfig,
 )
 from pier.models.task.config import (
     MAIN_SERVICE_NAME,
     MultiStepRewardStrategy,
+    NetworkMode,
+    NetworkPolicy,
     StepConfig,
     VerifierEnvironmentMode,
 )
@@ -217,6 +220,8 @@ class Trial:
         )
         self._agent = self._execution.agent
         self._environment = self._execution.environment
+        self._validate_network_policy_support()
+        self._validate_sidecar_configuration()
         self._init_artifact_handler()
 
         self._verifier_timeout_sec = min(
@@ -243,6 +248,102 @@ class Trial:
         file_handler.setLevel(logging.DEBUG)
         self._logger.addHandler(file_handler)
         self._log_handler = file_handler
+
+    def _validate_sidecar_configuration(self) -> None:
+        entries = [
+            *self._task.config.artifacts,
+            *self.config.artifacts,
+            *(
+                artifact
+                for step in self._task.config.steps or []
+                for artifact in step.artifacts
+            ),
+        ]
+        services = sidecar_services(entries)
+        hooks = list(self._task.config.verifier.collect)
+        for step in self._task.config.steps or []:
+            hooks.extend(step.verifier.collect)
+        services.update(
+            hook.service for hook in hooks if hook.service != MAIN_SERVICE_NAME
+        )
+        if not services:
+            return
+        if not self._environment.capabilities.docker_compose:
+            raise ValueError(
+                "Task references compose sidecar services "
+                f"{sorted(services)!r}, but the "
+                f"'{self._environment.type()}' environment is not compose-capable."
+            )
+        if not (self._task.paths.environment_dir / "docker-compose.yaml").exists():
+            raise ValueError(
+                "Task references compose sidecar services "
+                f"{sorted(services)!r}, but environment/docker-compose.yaml "
+                "does not exist."
+            )
+
+    def _supports_phase_policy(
+        self, baseline: NetworkPolicy, phase: NetworkPolicy
+    ) -> bool:
+        return phase == baseline or (
+            self._environment.capabilities.phase_scoped_egress
+            and baseline.network_mode is not NetworkMode.PUBLIC
+            and phase.network_mode is NetworkMode.ALLOWLIST
+        )
+
+    def _validate_network_policy_support(self) -> None:
+        """Reject policies Pier cannot enforce instead of weakening them."""
+        task_config = self._task.config
+        steps: list[StepConfig | None] = list(task_config.steps or [None])
+        agent_baseline = task_config.environment.resolve_baseline()
+        agent_policies = [
+            task_config.resolve_phase_policy("agent", step) for step in steps
+        ]
+        for policy in agent_policies:
+            if not self._supports_phase_policy(agent_baseline, policy):
+                raise ValueError(
+                    "Pier cannot enforce an agent phase network policy that "
+                    f"changes baseline {agent_baseline.model_dump(mode='json')} to "
+                    f"{policy.model_dump(mode='json')} in the "
+                    f"'{self._environment.type()}' environment. Use a matching "
+                    "[environment] baseline or a separate task environment."
+                )
+        if len({policy.model_dump_json() for policy in agent_policies}) > 1:
+            raise ValueError(
+                "Pier cannot enforce different agent network policies across "
+                "steps in one long-lived environment."
+            )
+
+        verifier_allowlists: set[tuple[str, ...]] = set()
+        for index, step in enumerate(steps):
+            verifier_env = resolve_effective_verifier_env_config(task_config, step)
+            baseline = (
+                verifier_env.resolve_baseline()
+                if verifier_env is not None
+                else agent_baseline
+            )
+            policy = task_config.resolve_phase_policy(
+                "verifier", step, baseline=baseline
+            )
+            if not self._supports_phase_policy(baseline, policy):
+                raise ValueError(
+                    "Pier cannot enforce a verifier phase network policy that "
+                    f"changes baseline {baseline.model_dump(mode='json')} to "
+                    f"{policy.model_dump(mode='json')} in the "
+                    f"'{self._environment.type()}' environment. Use "
+                    "[verifier].environment_mode='separate' with a matching "
+                    "[verifier.environment] baseline."
+                )
+            if (
+                verifier_env is None
+                and policy.network_mode is NetworkMode.ALLOWLIST
+                and policy != agent_policies[index]
+            ):
+                verifier_allowlists.add(tuple(policy.allowed_hosts))
+        if len(verifier_allowlists) > 1:
+            raise ValueError(
+                "Pier cannot enforce different shared-verifier allowlists across "
+                "steps in one long-lived environment."
+            )
 
     def _close_logger_handler(self) -> None:
         if self._log_handler is not None:
@@ -361,6 +462,10 @@ class Trial:
             step_cfg,
         )
         if separate_env_config is None:
+            verifier_hosts = self._task.config.shared_verifier_allowed_hosts(step_cfg)
+            verifier_policy = self._task.config.resolve_phase_policy(
+                "verifier", step_cfg
+            )
             verifier = Verifier(
                 task=self._task,
                 trial_paths=self._trial_paths,
@@ -371,9 +476,11 @@ class Trial:
                 step_name=step_cfg.name if step_cfg is not None else None,
                 # Credentials for the proxy's verifier user, and only when this
                 # verify pass has a network policy of its own to enforce.
-                use_verifier_proxy_env=bool(
-                    self._task.config.shared_verifier_allowed_hosts(step_cfg)
+                use_proxy_env=(
+                    verifier_policy.network_mode is NetworkMode.ALLOWLIST
+                    and not verifier_hosts
                 ),
+                use_verifier_proxy_env=bool(verifier_hosts),
             )
             return await verifier.verify()
 
@@ -767,10 +874,7 @@ class Trial:
                 artifacts_dir = await self._collect_step_artifacts(step_cfg)
                 mode = resolve_step_verifier_mode(self._task.config, step_cfg)
 
-                if (
-                    mode == VerifierEnvironmentMode.SEPARATE
-                    and i == len(steps) - 1
-                ):
+                if mode == VerifierEnvironmentMode.SEPARATE and i == len(steps) - 1:
                     await self._stop_agent_environment(keep_images=True)
 
                 if not self.config.verifier.disable:
@@ -843,17 +947,13 @@ class Trial:
             return
         target = "/tmp/.pier-pre-artifacts.sh"
         try:
-            await self._environment.upload_file(
-                source_path=script, target_path=target
-            )
+            await self._environment.upload_file(source_path=script, target_path=target)
             result = await self._environment.exec(
                 command=f"bash {target}",
                 timeout_sec=300,
             )
             if result.return_code != 0:
-                self._logger.warning(
-                    f"pre_artifacts.sh exited {result.return_code}"
-                )
+                self._logger.warning(f"pre_artifacts.sh exited {result.return_code}")
         except Exception:
             self._logger.warning(
                 "pre_artifacts.sh failed to run; continuing without it",
@@ -868,25 +968,19 @@ class Trial:
         (e.g. capture the change set as ``/logs/artifacts/model.patch`` for a
         separate verifier). Failures are logged, not fatal: a missing or failed
         capture simply yields no artifact, which downstream grading treats as
-        an empty submission. Hooks targeting a compose service other than main
-        are skipped: Pier does not run commands in sidecar services.
+        an empty submission.
         """
         hooks = list(self._task.config.verifier.collect)
         if step_cfg is not None:
             hooks.extend(step_cfg.verifier.collect)
         for hook in hooks:
-            if hook.service != MAIN_SERVICE_NAME:
-                self._logger.warning(
-                    f"Skipping collect hook targeting unsupported service "
-                    f"'{hook.service}': {hook.command!r}"
-                )
-                continue
             self._logger.debug(
                 f"Running collect hook in service '{hook.service}': {hook.command!r}"
             )
             try:
-                result = await self._environment.exec(
-                    command=hook.command,
+                result = await self._environment.service_exec(
+                    hook.command,
+                    service=hook.service,
                     timeout_sec=int(hook.timeout_sec),
                     user=hook.user,
                 )

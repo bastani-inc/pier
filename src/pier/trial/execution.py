@@ -189,7 +189,7 @@ class TrialExecution:
         *,
         agent,
         agent_config: AgentConfig,
-        allow_internet: bool,
+        has_public_network: bool,
         task_allowed_hosts: Sequence[str] = (),
     ) -> NetworkAllowlist:
         """Union the task's and the run's extra hosts into the agent's allowlist."""
@@ -197,7 +197,7 @@ class TrialExecution:
         extra_hosts = [*task_allowed_hosts, *agent_config.extra_allowed_hosts]
         if not extra_hosts:
             return allowlist
-        if allow_internet:
+        if has_public_network:
             warnings.warn(
                 f"Allowlist host(s) {extra_hosts!r} are ignored because the "
                 "effective network policy is public.",
@@ -235,7 +235,7 @@ class TrialExecution:
             network_allowlist=TrialExecution._resolve_network_allowlist(
                 agent=agent,
                 agent_config=agent_config,
-                allow_internet=task.config.environment.allow_internet,
+                has_public_network=task.config.environment.has_public_network,
                 task_allowed_hosts=task.config.agent_allowed_hosts(),
             ),
             verifier_network_allowlist=(

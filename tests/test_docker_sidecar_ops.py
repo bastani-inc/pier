@@ -97,3 +97,25 @@ async def test_windows_containers_reject_sidecar_operations(tmp_path: Path) -> N
 
     with pytest.raises(NotImplementedError, match="Windows"):
         await environment.service_exec("dir", service="db")
+
+
+def test_windows_does_not_advertise_sidecar_or_proxy_capabilities(
+    tmp_path: Path,
+) -> None:
+    environment = _make_environment(tmp_path, os=TaskOS.WINDOWS)
+
+    assert environment.capabilities.docker_compose is False
+    assert environment.capabilities.filtered_egress is False
+    assert environment.capabilities.phase_scoped_egress is False
+
+
+def test_compose_does_not_advertise_single_container_proxy_capabilities(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docker-compose.yaml").write_text("services: {}\n")
+    environment = _make_environment(tmp_path)
+
+    assert environment.capabilities.docker_compose is True
+    assert environment.capabilities.filtered_egress is False
+    assert environment.capabilities.phase_scoped_egress is False
+    assert environment.capabilities.preinstall_agents is False

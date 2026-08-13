@@ -14,7 +14,7 @@ from typer import Option, Typer
 from pier.cli.host_env import confirm_host_env_access
 from pier.cli.utils import parse_env_vars, parse_kwargs, run_async
 from pier.models.agent.name import AgentName
-from pier.models.agent.network import normalize_allowed_hosts
+from pier.models.agent.network import normalize_pier_allowed_hosts
 from pier.models.environment_type import EnvironmentType
 from pier.models.job.config import (
     DatasetConfig,
@@ -645,7 +645,7 @@ def start(
     if retry_exclude_exceptions is not None:
         config.retry.exclude_exceptions = set(retry_exclude_exceptions)
 
-    extra_allowed_hosts = normalize_allowed_hosts(allow_agent_hosts or [])
+    extra_allowed_hosts = normalize_pier_allowed_hosts(allow_agent_hosts or [])
 
     if agent_name is not None or agent_import_path is not None:
         config.agents = []

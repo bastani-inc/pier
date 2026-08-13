@@ -36,9 +36,7 @@ def test_daytona_collapses_resolved_cidrs_to_daytona_limit(monkeypatch):
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
-    _resolution, cidrs = resolve_network_allowlist_to_daytona_cidrs(
-        ["api.openai.com"]
-    )
+    _resolution, cidrs = resolve_network_allowlist_to_daytona_cidrs(["api.openai.com"])
 
     assert len(cidrs) <= DAYTONA_MAX_NETWORK_ALLOWLIST_CIDRS
     assert all(cidr.endswith(("/32", "/31", "/30", "/29", "/28")) for cidr in cidrs)
@@ -50,7 +48,7 @@ def test_daytona_network_params_use_resolved_allowlist(monkeypatch):
     env._explicit_network_block_all = None
     env._resolved_network_allow_list = None
     env._network_resolution_debug = {}
-    env.task_env_config = type("TaskEnv", (), {"allow_internet": False})()
+    env.task_env_config = type("TaskEnv", (), {"has_public_network": False})()
     env.network_allowlist = NetworkAllowlist(domains=["api.openai.com"])
     env.logger = logging.getLogger("test")
 
@@ -74,7 +72,7 @@ def test_daytona_network_params_block_when_no_cidrs(monkeypatch):
     env._explicit_network_block_all = None
     env._resolved_network_allow_list = None
     env._network_resolution_debug = {}
-    env.task_env_config = type("TaskEnv", (), {"allow_internet": False})()
+    env.task_env_config = type("TaskEnv", (), {"has_public_network": False})()
     env.network_allowlist = NetworkAllowlist(domains=[".anthropic.com"])
     env.logger = logging.getLogger("test")
 
@@ -115,7 +113,7 @@ def test_daytona_network_params_include_ip_entries(caplog):
     env._explicit_network_block_all = None
     env._resolved_network_allow_list = None
     env._network_resolution_debug = {}
-    env.task_env_config = type("TaskEnv", (), {"allow_internet": False})()
+    env.task_env_config = type("TaskEnv", (), {"has_public_network": False})()
     env.network_allowlist = NetworkAllowlist(ip_entries=["203.0.113.7", "2001:db8::1"])
     env.logger = logging.getLogger("test")
 
@@ -138,7 +136,7 @@ def test_daytona_compose_keeps_main_network_when_sandbox_allowlist_is_active():
         "TaskEnv",
         (),
         {
-            "allow_internet": False,
+            "has_public_network": False,
             "env": {},
             "cpus": 1,
             "memory_mb": 1024,

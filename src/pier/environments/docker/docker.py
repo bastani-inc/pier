@@ -166,6 +166,8 @@ class DockerEnvironment(BaseEnvironment):
         *args,
         **kwargs,
     ):
+        self._is_windows_container = task_env_config.os == TaskOS.WINDOWS
+        self._env_paths = EnvironmentPaths.for_os(task_env_config.os)
         super().__init__(
             environment_dir=environment_dir,
             environment_name=environment_name,
@@ -176,12 +178,6 @@ class DockerEnvironment(BaseEnvironment):
         )
 
         self._keep_containers = keep_containers
-        self._is_windows_container = task_env_config.os == TaskOS.WINDOWS
-        self._env_paths = (
-            EnvironmentPaths.for_windows()
-            if self._is_windows_container
-            else EnvironmentPaths()
-        )
         # Select the platform-specific file-transfer and exec helpers.
         if self._is_windows_container:
             import uuid
@@ -278,14 +274,17 @@ class DockerEnvironment(BaseEnvironment):
 
     @property
     def capabilities(self) -> EnvironmentCapabilities:
+        supports_linux_single_container = (
+            not self._uses_compose and not self._is_windows_container
+        )
         return EnvironmentCapabilities(
             disable_internet=True,
-            filtered_egress=True,
-            phase_scoped_egress=True,
-            preinstall_agents=True,
+            filtered_egress=supports_linux_single_container,
+            phase_scoped_egress=supports_linux_single_container,
+            preinstall_agents=supports_linux_single_container,
             windows=True,
             mounted=True,
-            docker_compose=True,
+            docker_compose=not self._is_windows_container,
         )
 
     @classmethod
@@ -327,7 +326,7 @@ class DockerEnvironment(BaseEnvironment):
         file to override the keepalive command if it needs a different
         long-running process.
 
-        When allow_internet is False, the no-network compose file is appended
+        Under a restricted baseline, the no-network compose file is appended
         last to set network_mode: none on the main service.
         """
         build_or_prebuilt = (
@@ -352,7 +351,7 @@ class DockerEnvironment(BaseEnvironment):
 
         if self._egress_proxy_compose_path:
             paths.append(self._egress_proxy_compose_path)
-        elif not self.task_env_config.allow_internet:
+        elif not self.task_env_config.has_public_network:
             paths.append(self._DOCKER_COMPOSE_NO_NETWORK_PATH)
 
         return paths
@@ -393,7 +392,7 @@ class DockerEnvironment(BaseEnvironment):
     def _prepare_egress_proxy_compose(self) -> None:
         allowlist = self.network_allowlist
         verifier_allowlist = self.verifier_network_allowlist
-        if self.task_env_config.allow_internet or (
+        if self.task_env_config.has_public_network or (
             allowlist.is_empty and verifier_allowlist.is_empty
         ):
             return
@@ -468,6 +467,8 @@ class DockerEnvironment(BaseEnvironment):
             self._resources_compose_path = None
 
     def _validate_definition(self):
+        if self.task_env_config.docker_image:
+            return
         if (
             not self._dockerfile_path.exists()
             and not self._environment_docker_compose_path.exists()

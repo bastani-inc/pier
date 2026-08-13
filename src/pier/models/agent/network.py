@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 from collections.abc import Iterable
 
 from pydantic import BaseModel, Field, field_validator
@@ -9,6 +10,7 @@ _INVALID_ENTRY_MESSAGE = (
     "allowlist entries must be hostnames, IP addresses, or IP CIDR ranges, "
     "not URLs, ports, or paths"
 )
+_NETWORK_HOST_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
 def classify_allowlist_entry(value: str) -> tuple[bool, str]:
@@ -106,14 +108,67 @@ class NetworkAllowlist(BaseModel):
 
 
 def normalize_allowed_hosts(hosts: list[str]) -> list[str]:
-    """Normalize Harbor-style allowlist entries into :class:`NetworkAllowlist` form.
+    """Validate and normalize Harbor-style network allowlist entries."""
+    normalized: list[str] = []
+    for raw_host in hosts:
+        host = raw_host.strip().lower().rstrip(".")
+        if not host:
+            raise ValueError("allowed_hosts entries must be non-empty hostnames.")
+        if "/" in host:
+            if "%" in host:
+                raise ValueError(_INVALID_ENTRY_MESSAGE)
+            try:
+                normalized.append(ipaddress.ip_network(host, strict=True).compressed)
+            except ValueError as exc:
+                raise ValueError(_INVALID_ENTRY_MESSAGE) from exc
+            continue
+        if ":" in host:
+            if "%" in host:
+                raise ValueError(_INVALID_ENTRY_MESSAGE)
+            try:
+                address = ipaddress.ip_address(host)
+            except ValueError as exc:
+                raise ValueError(_INVALID_ENTRY_MESSAGE) from exc
+            if address.version != 6:
+                raise ValueError(_INVALID_ENTRY_MESSAGE)
+            normalized.append(address.compressed)
+            continue
+        if "[" in host or "]" in host:
+            raise ValueError(_INVALID_ENTRY_MESSAGE)
+        if host.startswith("*."):
+            hostname = host[2:]
+            if not hostname:
+                raise ValueError(
+                    "allowed_hosts wildcard entries must include a hostname suffix."
+                )
+            try:
+                ipaddress.ip_address(hostname)
+            except ValueError:
+                pass
+            else:
+                raise ValueError(
+                    "allowed_hosts wildcard entries must target hostnames, not IP "
+                    "address literals."
+                )
+        elif "*" in host:
+            raise ValueError(
+                "allowed_hosts wildcard entries must use a leading '*.' prefix."
+            )
+        else:
+            hostname = host
+        if not all(
+            _NETWORK_HOST_LABEL_PATTERN.match(label) for label in hostname.split(".")
+        ):
+            raise ValueError(
+                "allowed_hosts entries must be IP addresses, IP CIDR ranges, or "
+                "valid hostnames or leading wildcard host patterns containing "
+                "only letters, digits, hyphens, and dots."
+            )
+        normalized.append(host)
+    return normalized
 
-    Harbor spells a suffix match ``*.foo.com``; pier spells the same match
-    ``.foo.com``. Entries are lowercased and stripped of a trailing dot here,
-    so nothing downstream has to translate them again.
 
-    IP address literals and CIDR ranges are accepted and canonicalized by
-    :mod:`ipaddress`; hostnames sort ahead of them in the returned list.
-    """
+def normalize_pier_allowed_hosts(hosts: list[str]) -> list[str]:
+    """Normalize Pier run-config entries, including legacy ``.example.com``."""
     allowlist = NetworkAllowlist.from_entries(hosts)
     return [*allowlist.domains, *allowlist.ip_entries]

@@ -45,39 +45,92 @@ class NetworkMode(str, Enum):
     ALLOWLIST = "allowlist"
 
 
-class NetworkPolicyFieldsMixin(BaseModel):
-    """``network_mode``/``allowed_hosts`` fields shared by the [environment]
-    scope and the [agent]/[verifier] phase overrides (Harbor's
-    PhaseNetworkPolicyConfig equivalent).
+class NetworkPolicy(BaseModel):
+    """Resolved network policy for one environment or execution phase."""
 
-    Pier deviates from Harbor on 'allowlist'. Harbor scopes an allowlist to the
-    phase that declares it and enforces it container-wide; pier resolves one
-    allowlist per phase (see ``TaskConfig.agent_allowed_hosts``,
-    ``verifier_allowed_hosts`` and ``shared_verifier_allowed_hosts``) and
-    applies each to that phase's commands only — every other process in the
-    container stays offline. The fail direction is closed: 'allowlist' resolves
-    to allow_internet=False, so a host pier cannot enforce per-phase is a host
-    nothing can reach."""
+    network_mode: NetworkMode = NetworkMode.PUBLIC
+    allowed_hosts: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_allowed_hosts(self) -> "NetworkPolicy":
+        if self.network_mode != NetworkMode.ALLOWLIST and self.allowed_hosts:
+            raise ValueError(
+                "allowed_hosts is only valid when network_mode='allowlist'."
+            )
+        return self
+
+
+def _validate_network_policy_fields(
+    network_mode: NetworkMode | None,
+    allowed_hosts: list[str] | None,
+) -> None:
+    if network_mode is None:
+        if allowed_hosts is not None:
+            raise ValueError(
+                "allowed_hosts is only valid when network_mode='allowlist'."
+            )
+        return
+    NetworkPolicy(
+        network_mode=network_mode,
+        allowed_hosts=list(allowed_hosts or []),
+    )
+
+
+class AllowedHostsValidationMixin:
+    @field_validator("allowed_hosts")
+    @classmethod
+    def validate_host_names(cls, hosts: list[str] | None) -> list[str] | None:
+        return None if hosts is None else normalize_allowed_hosts(hosts)
+
+
+class PhaseNetworkPolicyConfig(AllowedHostsValidationMixin, BaseModel):
+    """Optional network override for an agent or verifier phase."""
 
     network_mode: NetworkMode | None = Field(
         default=None,
-        description="Network access policy ('no-network', 'public' or "
-        "'allowlist'). On [agent]/[verifier] this is an explicit phase "
-        "override; on [environment] it applies to both phases. When unset "
-        "everywhere, the legacy 'allow_internet' boolean applies.",
+        description="Network access policy used only as an explicit phase override.",
     )
     allowed_hosts: list[str] | None = Field(
         default=None,
-        description="Hosts reachable under network_mode='allowlist'. Harbor's "
-        "'*.foo.com' wildcard is normalized to pier's '.foo.com' suffix form "
-        "at parse time. IP address literals and CIDR ranges (IPv4 and IPv6) "
-        "are accepted and canonicalized.",
+        description="Hosts reachable when network_mode='allowlist'.",
     )
 
-    @field_validator("allowed_hosts")
-    @classmethod
-    def _normalize_allowed_hosts(cls, hosts: list[str] | None) -> list[str] | None:
-        return None if hosts is None else normalize_allowed_hosts(hosts)
+    @model_validator(mode="after")
+    def validate_network_policy_fields(self) -> "PhaseNetworkPolicyConfig":
+        _validate_network_policy_fields(self.network_mode, self.allowed_hosts)
+        return self
+
+    def explicit_phase_policy(self) -> NetworkPolicy | None:
+        if self.network_mode is None:
+            return None
+        return NetworkPolicy(
+            network_mode=self.network_mode,
+            allowed_hosts=list(self.allowed_hosts or []),
+        )
+
+
+class BaselineNetworkPolicyConfig(AllowedHostsValidationMixin, BaseModel):
+    """Network baseline established when an environment starts."""
+
+    network_mode: NetworkMode = Field(
+        default=NetworkMode.PUBLIC,
+        description="Network access policy for this environment.",
+    )
+    allowed_hosts: list[str] | None = Field(
+        default=None,
+        description="Hosts reachable when network_mode='allowlist'.",
+    )
+
+    @model_validator(mode="after")
+    def validate_network_policy_fields(self) -> "BaselineNetworkPolicyConfig":
+        _validate_network_policy_fields(self.network_mode, self.allowed_hosts)
+        return self
+
+    def resolve_baseline(self) -> NetworkPolicy:
+        return NetworkPolicy(
+            network_mode=self.network_mode,
+            allowed_hosts=list(self.allowed_hosts or []),
+        )
 
 
 class Author(BaseModel):
@@ -162,15 +215,13 @@ class VerifierCollectConfig(BaseModel):
     environment is torn down, so the files can be declared as artifacts and
     read by a separate verifier (e.g. capture the agent's change set as
     ``/logs/artifacts/model.patch``). Mirrors Harbor's ``[[verifier.collect]]``
-    blocks. Pier only runs hooks targeting the main service; hooks targeting
-    compose sidecar services are skipped with a warning.
+    blocks.
     """
 
     command: str = Field(..., description="Shell command to run in the service.")
     service: str = Field(
         default=MAIN_SERVICE_NAME,
-        description="Compose service to run the command in. Defaults to main. "
-        "Pier only runs hooks targeting main (the agent's container).",
+        description="Compose service to run the command in. Defaults to main.",
     )
     timeout_sec: float = Field(
         default=60.0,
@@ -191,7 +242,7 @@ class VerifierCollectConfig(BaseModel):
         return validated
 
 
-class VerifierConfig(NetworkPolicyFieldsMixin):
+class VerifierConfig(PhaseNetworkPolicyConfig):
     timeout_sec: float = 600.0
     env: dict[str, str] = Field(default_factory=dict)
     user: str | int | None = Field(
@@ -221,7 +272,7 @@ class VerifierConfig(NetworkPolicyFieldsMixin):
     collect: list[VerifierCollectConfig] = Field(
         default_factory=list,
         description=(
-            "Commands run in the agent environment after the agent phase ends "
+            "Commands run in compose services after the agent phase ends "
             "and before artifact collection ([[verifier.collect]] blocks in "
             "task.toml). Use these to snapshot runtime state into files that "
             "artifact entries can then collect."
@@ -246,7 +297,7 @@ class SolutionConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
 
 
-class AgentConfig(NetworkPolicyFieldsMixin):
+class AgentConfig(PhaseNetworkPolicyConfig):
     timeout_sec: float | None = None
     user: str | int | None = Field(
         default=None,
@@ -330,7 +381,7 @@ class TpuSpec(BaseModel):
         return math.prod(int(axis) for axis in self.topology.split("x"))
 
 
-class EnvironmentConfig(NetworkPolicyFieldsMixin):
+class EnvironmentConfig(BaselineNetworkPolicyConfig):
     build_timeout_sec: float = 600.0  # 10 minutes default
     docker_image: str | None = None
     os: TaskOS = Field(
@@ -357,13 +408,6 @@ class EnvironmentConfig(NetworkPolicyFieldsMixin):
         description="TPU slice specification (type + topology). When set, the "
         "environment requests a TPU node matching this spec.",
     )
-    allow_internet: bool = Field(
-        default=True,
-        description="Whether to allow internet access in the environment. "
-        "Legacy boolean: when 'network_mode' is set (here or as an "
-        "[agent]/[verifier] phase override), the resolved mode wins and this "
-        "field is overwritten at TaskConfig validation time.",
-    )
     mcp_servers: list["MCPServerConfig"] = Field(default_factory=list)
     env: dict[str, str] = Field(
         default_factory=dict,
@@ -386,15 +430,9 @@ class EnvironmentConfig(NetworkPolicyFieldsMixin):
         "Overrides the container's WORKDIR when set.",
     )
 
-    # Deprecated fields - marked as excluded so they don't appear in serialization by default
-    memory: str | None = Field(
+    allow_internet: bool | None = Field(
         default=None,
-        deprecated="Use 'memory_mb' instead. This field will be removed in a future version.",
-        exclude=True,
-    )
-    storage: str | None = Field(
-        default=None,
-        deprecated="Use 'storage_mb' instead. This field will be removed in a future version.",
+        description="Deprecated compatibility field. Use network_mode instead.",
         exclude=True,
     )
 
@@ -405,6 +443,10 @@ class EnvironmentConfig(NetworkPolicyFieldsMixin):
         if isinstance(v, str):
             return v.lower()
         return v
+
+    @property
+    def has_public_network(self) -> bool:
+        return self.network_mode is NetworkMode.PUBLIC
 
     @staticmethod
     def _parse_size_to_mb(size_str: str) -> int:
@@ -425,9 +467,17 @@ class EnvironmentConfig(NetworkPolicyFieldsMixin):
     @model_validator(mode="before")
     @classmethod
     def _migrate_legacy_resource_fields(cls, data: Any) -> Any:
-        """Map deprecated memory/storage fields to memory_mb/storage_mb."""
+        """Map deprecated fields to the current environment schema."""
         if not isinstance(data, dict):
             return data
+
+        if data.get("allow_internet") is not None:
+            warnings.warn(
+                "The 'allow_internet' field is deprecated. Use "
+                "[environment].network_mode instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         if "memory" in data:
             warnings.warn(
@@ -710,150 +760,75 @@ class TaskConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def resolve_network_modes(self) -> "TaskConfig":
-        """Resolve Harbor-style ``network_mode`` declarations onto the legacy
-        ``allow_internet`` booleans that pier's environments enforce.
-
-        Precedence per phase (mirrors Harbor): explicit [agent]/[verifier]
-        override > [environment] scope > legacy ``allow_internet``. 'public'
-        maps to allow_internet=True; 'no-network' and 'allowlist' both map to
-        allow_internet=False — an allowlist is enforced on top of a closed
-        environment by the egress proxy, from the hosts collected by
-        ``agent_allowed_hosts`` and ``shared_verifier_allowed_hosts``.
-
-        Before this resolution existed, pier silently IGNORED network_mode and
-        fell back to allow_internet's default of True.
-        """
-        task_mode = self.environment.network_mode
-
-        agent_mode = self.agent.network_mode or task_mode
-        if agent_mode is not None:
-            self.environment.network_mode = agent_mode
-            self.environment.allow_internet = agent_mode == NetworkMode.PUBLIC
-
-        def _resolve_verifier(verifier: VerifierConfig) -> None:
-            mode = verifier.network_mode or task_mode
-            if mode is None:
-                return
+    def handle_deprecated_environment_allow_internet(self) -> "TaskConfig":
+        """Migrate Harbor's legacy baseline boolean without changing phases."""
+        environments = [self.environment]
+        if self.verifier.environment is not None:
+            environments.append(self.verifier.environment)
+        environments.extend(
+            step.verifier.environment
+            for step in self.steps or []
+            if step.verifier.environment is not None
+        )
+        for environment in environments:
+            allow_internet = environment.allow_internet
             if (
-                verifier.environment is None
-                and verifier.network_mode is not None
-                and verifier.environment_mode == VerifierEnvironmentMode.SEPARATE
+                allow_internet is not None
+                and "network_mode" not in environment.model_fields_set
+                and environment.allowed_hosts is None
             ):
-                # An explicit [verifier] override with environment_mode =
-                # 'separate' but no spelled-out [verifier.environment] would be
-                # lost when the runtime materializes the fresh copy — do it now.
-                verifier.environment = self.environment.model_copy(deep=True)
-            if verifier.environment is not None:
-                verifier.environment.network_mode = mode
-                verifier.environment.allow_internet = mode == NetworkMode.PUBLIC
-            elif (
-                verifier.network_mode is not None
-                and agent_mode is not None
-                and verifier.network_mode != agent_mode
-                and NetworkMode.PUBLIC in (verifier.network_mode, agent_mode)
-            ):
-                # Shared-environment verifier: it runs in the agent's container,
-                # so the container's kernel-level route is the agent's. Two
-                # *restricted* modes still work — the egress proxy tells the
-                # phases apart by proxy user (see
-                # ``shared_verifier_allowed_hosts``) — but a 'public' phase
-                # cannot be mixed with a restricted one: the container either
-                # has a real route to the internet or it does not.
-                raise ValueError(
-                    f"[verifier].network_mode={verifier.network_mode.value!r} "
-                    "conflicts with the agent environment's resolved network "
-                    f"policy {agent_mode.value!r} but the verifier shares that "
-                    "environment. A shared verifier supports only restricted "
-                    "combinations of 'no-network' and 'allowlist' (any mix); a "
-                    "'public' phase cannot be mixed with a restricted one. Use "
-                    "[verifier].environment_mode='separate' to give the "
-                    "verifier its own network policy."
+                environment.network_mode = (
+                    NetworkMode.PUBLIC if allow_internet else NetworkMode.NO_NETWORK
                 )
-
-        _resolve_verifier(self.verifier)
-        for step in self.steps or []:
-            _resolve_verifier(step.verifier)
+            environment.allow_internet = None
         return self
 
-    def _verifier_phases(self) -> list["StepConfig | None"]:
-        """Every verify pass the task declares, as ``step_cfg`` arguments."""
-        return [None, *(self.steps or [])]
-
-    def _verifier_scope_hosts(self, step_cfg: "StepConfig | None") -> set[str]:
-        """``allowed_hosts`` declared by the scopes one verify pass owns."""
-        verifier = step_cfg.verifier if step_cfg is not None else self.verifier
-        scopes: list[NetworkPolicyFieldsMixin | None] = [verifier, verifier.environment]
-        return {host for scope in scopes if scope for host in scope.allowed_hosts or []}
+    def resolve_phase_policy(
+        self,
+        role: Literal["agent", "verifier"],
+        step_cfg: "StepConfig | None" = None,
+        *,
+        baseline: NetworkPolicy | None = None,
+    ) -> NetworkPolicy:
+        task_phase = getattr(self, role).explicit_phase_policy()
+        step_phase = (
+            getattr(step_cfg, role).explicit_phase_policy()
+            if step_cfg is not None
+            else None
+        )
+        return (
+            step_phase or task_phase or baseline or self.environment.resolve_baseline()
+        )
 
     def agent_allowed_hosts(self) -> list[str]:
-        """Hosts reachable from the agent phase.
-
-        The [environment] and [agent] scopes always count. Verifier scopes join
-        them only for verify passes that have no policy of their own — pier's
-        historical single-allowlist union (see :class:`NetworkPolicyFieldsMixin`),
-        kept so tasks that declare hosts under [verifier] without a verifier
-        network policy resolve exactly as before. When a verify pass *does* have
-        its own policy (a separate verifier environment, or a shared verifier
-        with its own proxy user), its hosts belong to that phase alone and are
-        withheld from the agent.
-        """
-        scopes: list[NetworkPolicyFieldsMixin | None] = [self.environment, self.agent]
-        for step in self.steps or []:
-            scopes.append(step.agent)
-        hosts = {
-            host for scope in scopes if scope for host in scope.allowed_hosts or []
-        }
-        for step_cfg in self._verifier_phases():
-            if self._verifier_phase_has_own_hosts(step_cfg):
-                continue
-            hosts |= self._verifier_scope_hosts(step_cfg)
-        return sorted(hosts)
-
-    def _verifier_phase_has_own_hosts(self, step_cfg: "StepConfig | None") -> bool:
-        """True when one verify pass enforces an allowlist of its own."""
-        return bool(
-            self.verifier_allowed_hosts(step_cfg)
-            or self.shared_verifier_allowed_hosts(step_cfg)
+        """Union of agent allowlists needed to provision Pier's fixed proxy."""
+        phases: list[StepConfig | None] = list(self.steps) if self.steps else [None]
+        return sorted(
+            {
+                host
+                for step_cfg in phases
+                for host in self.resolve_phase_policy("agent", step_cfg).allowed_hosts
+            }
         )
 
     def shared_verifier_allowed_hosts(
         self, step_cfg: "StepConfig | None" = None
     ) -> list[str]:
-        """Hosts reachable from a *shared* verifier phase, via its proxy user.
-
-        A shared verifier runs inside the agent's container, so a policy of its
-        own is enforceable only by the egress proxy authenticating the verifier
-        command as a second proxy user (see
-        :func:`pier.environments.agent_setup.squid_bootstrap_command`).
-
-        Non-empty only when the verifier declares an explicit ``network_mode``
-        of 'allowlist' that *differs* from the agent's resolved mode, plus
-        hosts. That is exactly the set of declarations that used to fail to
-        parse, so no task that runs today gains or loses proxy credentials:
-        when the two phases resolve to the same mode the verifier keeps its
-        historical behaviour (offline inside the agent's container, its hosts
-        folded into :meth:`agent_allowed_hosts`).
-        """
-        # Local import: verifier_mode imports this module.
+        """Hosts for one verifier phase that shares the agent environment."""
         from pier.models.task.verifier_mode import (
             resolve_effective_verifier_env_config,
         )
 
         if resolve_effective_verifier_env_config(self, step_cfg) is not None:
-            return []  # Separate environment: verifier_allowed_hosts() owns it.
-        verifier = step_cfg.verifier if step_cfg is not None else self.verifier
-        agent_mode = self.environment.network_mode
-        if (
-            verifier.network_mode is not NetworkMode.ALLOWLIST
-            or agent_mode is None
-            or verifier.network_mode == agent_mode
-        ):
             return []
-        scopes: list[NetworkPolicyFieldsMixin] = [self.verifier]
-        if step_cfg is not None:
-            scopes.append(step_cfg.verifier)
-        return sorted({host for scope in scopes for host in scope.allowed_hosts or []})
+        verifier_policy = self.resolve_phase_policy("verifier", step_cfg)
+        agent_policy = self.resolve_phase_policy("agent", step_cfg)
+        return (
+            verifier_policy.allowed_hosts
+            if verifier_policy != agent_policy
+            and verifier_policy.network_mode is NetworkMode.ALLOWLIST
+            else []
+        )
 
     def shared_verifier_proxy_hosts(self) -> list[str]:
         """Union of every shared verify pass's own hosts.
@@ -864,28 +839,13 @@ class TaskConfig(BaseModel):
         return sorted(
             {
                 host
-                for step_cfg in self._verifier_phases()
+                for step_cfg in (self.steps if self.steps else [None])
                 for host in self.shared_verifier_allowed_hosts(step_cfg)
             }
         )
 
     def verifier_allowed_hosts(self, step_cfg: "StepConfig | None" = None) -> list[str]:
-        """Hosts reachable from a *separate* verifier environment.
-
-        Scoped tighter than :meth:`agent_allowed_hosts`: only the [verifier]
-        phase override and the environment the verifier actually runs in count.
-        Agent-derived model hosts and run-level ``--allow-agent-host`` extras are
-        deliberately excluded — the verifier has no business reaching the model
-        API, so its sandbox stays tighter than the agent's.
-
-        The effective environment is resolved exactly as the runtime resolves it
-        (step env > task verifier env > a fresh copy of [environment]), so the
-        baseline [environment] hosts are included only when that baseline is what
-        the verifier actually runs in. Returns [] for a shared-environment
-        verifier: it runs inside the agent's container under the agent's
-        allowlist.
-        """
-        # Local import: verifier_mode imports this module.
+        """Effective allowlist for a separate verifier phase."""
         from pier.models.task.verifier_mode import (
             resolve_effective_verifier_env_config,
         )
@@ -893,10 +853,11 @@ class TaskConfig(BaseModel):
         env_config = resolve_effective_verifier_env_config(self, step_cfg)
         if env_config is None:
             return []
-        scopes: list[NetworkPolicyFieldsMixin] = [self.verifier, env_config]
-        if step_cfg is not None:
-            scopes.append(step_cfg.verifier)
-        return sorted({host for scope in scopes for host in scope.allowed_hosts or []})
+        return self.resolve_phase_policy(
+            "verifier",
+            step_cfg,
+            baseline=env_config.resolve_baseline(),
+        ).allowed_hosts
 
     @classmethod
     def model_validate_toml(cls, toml_data: str) -> "TaskConfig":
