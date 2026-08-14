@@ -41,6 +41,7 @@ from pier.models.trial.config import (
     ServiceVolumeConfig,
     TrialConfig,
 )
+from pier.models.trial.artifact_manifest import ArtifactManifest
 from pier.models.trial.paths import TrialPaths
 from pier.models.trial.result import (
     ExceptionInfo,
@@ -49,7 +50,11 @@ from pier.models.trial.result import (
     TrialResult,
 )
 from pier.models.verifier.result import VerifierResult
-from pier.trial.artifact_handler import ArtifactHandler
+from pier.trial.artifact_handler import (
+    ArtifactHandler,
+    MissingArtifactError,
+    failed_artifact_entries,
+)
 from pier.trial.hooks import TrialEvent, TrialHookEvent
 from pier.trial.execution import (
     AgentSetupTimeoutError,
@@ -749,7 +754,7 @@ class Trial:
                 # Collect artifacts from the agent environment before
                 # verification so a separate verifier environment can receive
                 # them.
-                artifacts_dir = await self._collect_step_artifacts(step_cfg)
+                artifacts_dir = await self._collect_step_artifacts(step_cfg, step_result)
                 mode = resolve_step_verifier_mode(self._task.config, step_cfg)
 
                 if (
@@ -910,6 +915,31 @@ class Trial:
         except Exception:
             self._logger.error("Failed to upload agent logs back to environment")
 
+    def _record_missing_artifacts(
+        self,
+        manifest: ArtifactManifest,
+        *,
+        step_result: StepResult | None = None,
+    ) -> None:
+        """Turn an artifact that never arrived into a real trial failure.
+
+        ``download_artifacts`` is best-effort and has always returned a manifest
+        whose entries carry ``status``; nothing read it, so a trial whose task
+        declared ``/logs/artifacts/model.patch`` and produced none still counted
+        as an ordinary completed trial. ``exception_info`` is the only field
+        ``JobStats.increment`` treats as an error, so record it there — and only
+        when it is still unset, because this runs on the cancel and outer-except
+        paths too, where clobbering would lose the real cause.
+        """
+        offenders = failed_artifact_entries(manifest)
+        if not offenders:
+            return
+        error = MissingArtifactError(offenders)
+        self._logger.error(str(error))
+        target = step_result if step_result is not None else self.result
+        if target.exception_info is None:
+            target.exception_info = ExceptionInfo.from_exception(error)
+
     async def _collect_artifacts(self) -> None:
         """Collect trial-level artifacts into ``trial_dir/artifacts/``.
 
@@ -919,26 +949,30 @@ class Trial:
         if self._are_artifacts_collected:
             return
 
-        await self._artifact_handler.download_artifacts(
+        manifest = await self._artifact_handler.download_artifacts(
             self._environment,
             self._trial_paths.artifacts_dir,
             source_artifacts_dir=self._environment.env_paths.artifacts_dir,
         )
+        self._record_missing_artifacts(manifest)
         self._are_artifacts_collected = True
 
-    async def _collect_step_artifacts(self, step: StepConfig) -> Path:
+    async def _collect_step_artifacts(
+        self, step: StepConfig, step_result: StepResult | None = None
+    ) -> Path:
         """Collect artifacts for a single step before its verification pass."""
         artifacts_dir = (
             self._trial_paths.artifacts_dir
             if self._environment.capabilities.mounted
             else self._trial_paths.step_artifacts_dir(step.name)
         )
-        await self._artifact_handler.download_artifacts(
+        manifest = await self._artifact_handler.download_artifacts(
             self._environment,
             artifacts_dir,
             source_artifacts_dir=self._environment.env_paths.artifacts_dir,
             artifacts=step.artifacts,
         )
+        self._record_missing_artifacts(manifest, step_result=step_result)
         return artifacts_dir
 
     async def run(self) -> TrialResult:

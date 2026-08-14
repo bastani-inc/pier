@@ -12,6 +12,39 @@ from pier.models.trial.artifact_manifest import (
 from pier.models.trial.config import ArtifactConfig
 
 
+class MissingArtifactError(RuntimeError):
+    """A declared artifact was not collected, or was collected empty.
+
+    Artifact download is best-effort by design, and the manifest has always
+    recorded per-entry ``status``. Nothing read it, so a trial whose task
+    declared ``/logs/artifacts/model.patch`` and produced nothing still finished
+    as an ordinary completed trial. Raising this into ``TrialResult`` is what
+    makes such a trial count as errored.
+    """
+
+    def __init__(self, entries: Sequence[ArtifactManifestEntry]) -> None:
+        self.entries = tuple(entries)
+        rendered = ", ".join(f"{entry.source} ({entry.status})" for entry in self.entries)
+        super().__init__(f"Declared artifact(s) missing or empty after collection: {rendered}")
+
+
+def failed_artifact_entries(
+    manifest: ArtifactManifest,
+) -> tuple[ArtifactManifestEntry, ...]:
+    """Return the manifest entries that mean an artifact did not arrive.
+
+    A ``failed`` entry of any type counts. An ``empty`` entry counts only for a
+    *file*: an empty artifacts *directory* is the ordinary shape of a task that
+    declares no artifacts, while an empty declared file is a file that carried
+    nothing.
+    """
+    return tuple(
+        entry
+        for entry in manifest.entries
+        if entry.status == "failed" or (entry.status == "empty" and entry.type == "file")
+    )
+
+
 class ArtifactHandler:
     def __init__(
         self,
@@ -202,7 +235,7 @@ class ArtifactHandler:
                 source=source,
                 destination=manifest_destination,
                 type=artifact_type,
-                status="ok",
+                status=self._downloaded_status(target, artifact_type),
             )
         except Exception:
             self.logger.debug(
@@ -215,6 +248,26 @@ class ArtifactHandler:
                 type="directory" if is_dir else "file",
                 status="failed",
             )
+
+    @staticmethod
+    def _downloaded_status(target: Path, artifact_type: str) -> str:
+        """Classify a downloaded artifact as ``ok`` or ``empty``.
+
+        A declared file artifact that arrives with zero bytes carried nothing —
+        an empty ``model.patch`` says as little as a missing one — so it is
+        reported as ``empty``, mirroring how a mounted artifacts *directory*
+        with no contents is already reported. A target that does not exist is
+        left ``ok``: the download reported success and the caller (or a test
+        double) owns the path.
+        """
+        if artifact_type != "file":
+            return "ok"
+        try:
+            if target.is_file() and target.stat().st_size == 0:
+                return "empty"
+        except OSError:
+            return "ok"
+        return "ok"
 
     def _record_mounted_artifacts_dir(
         self,
