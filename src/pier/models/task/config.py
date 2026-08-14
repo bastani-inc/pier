@@ -8,7 +8,7 @@ from enum import Enum
 from typing import Any
 
 import toml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pier.constants import ORG_NAME_PATTERN
 
@@ -49,6 +49,8 @@ class NetworkPolicyFieldsMixin(BaseModel):
     'allowlist' (and its 'allowed_hosts' companion) is rejected at parse time
     rather than silently mis-enforced."""
 
+    model_config = ConfigDict(extra="forbid")
+
     network_mode: NetworkMode | None = Field(
         default=None,
         description="Network access policy ('no-network' or 'public'). On "
@@ -77,6 +79,8 @@ class NetworkPolicyFieldsMixin(BaseModel):
 class Author(BaseModel):
     """Author information for a package or dataset."""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(..., description="Author name")
     email: str | None = Field(default=None, description="Author email address")
 
@@ -86,6 +90,8 @@ class PackageInfo(BaseModel):
 
     This section identifies the package in the registry with a unique name.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(
         ...,
@@ -155,6 +161,8 @@ class VerifierCollectConfig(BaseModel):
     compose sidecar services are skipped with a warning.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     command: str = Field(..., description="Shell command to run in the service.")
     service: str = Field(
         default=MAIN_SERVICE_NAME,
@@ -181,6 +189,8 @@ class VerifierCollectConfig(BaseModel):
 
 
 class VerifierConfig(NetworkPolicyFieldsMixin):
+    model_config = ConfigDict(extra="forbid")
+
     timeout_sec: float = 600.0
     env: dict[str, str] = Field(default_factory=dict)
     user: str | int | None = Field(
@@ -232,10 +242,14 @@ class VerifierConfig(NetworkPolicyFieldsMixin):
 
 
 class SolutionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     env: dict[str, str] = Field(default_factory=dict)
 
 
 class AgentConfig(NetworkPolicyFieldsMixin):
+    model_config = ConfigDict(extra="forbid")
+
     timeout_sec: float | None = None
     user: str | int | None = Field(
         default=None,
@@ -249,6 +263,8 @@ class HealthcheckConfig(BaseModel):
     Runs a command repeatedly after environment start to verify readiness.
     All retries must pass before agent setup begins.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     command: str = Field(..., description="Shell command to run. Exit 0 means healthy.")
     interval_sec: float = Field(
@@ -275,6 +291,8 @@ class HealthcheckConfig(BaseModel):
 
 
 class EnvironmentConfig(NetworkPolicyFieldsMixin):
+    model_config = ConfigDict(extra="forbid")
+
     build_timeout_sec: float = 600.0  # 10 minutes default
     docker_image: str | None = None
     os: TaskOS = Field(
@@ -405,6 +423,8 @@ class EnvironmentConfig(NetworkPolicyFieldsMixin):
 class MCPServerConfig(BaseModel):
     """Configuration for an MCP server available to the agent."""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     transport: str = "sse"  # "sse" | "streamable-http" | "stdio"
     url: str | None = None  # required for sse/streamable-http
@@ -421,6 +441,8 @@ class MCPServerConfig(BaseModel):
 
 
 class ArtifactConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     source: str
     destination: str | None = None
     exclude: list[str] = Field(
@@ -431,6 +453,8 @@ class ArtifactConfig(BaseModel):
 
 
 class StepConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     agent: AgentConfig = Field(default_factory=AgentConfig)
     verifier: VerifierConfig = Field(default_factory=VerifierConfig)
@@ -467,6 +491,8 @@ class MultiStepRewardStrategy(str, Enum):
 
 
 class TaskConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     schema_version: str = "1.2"
     task: PackageInfo | None = Field(
         default=None,
