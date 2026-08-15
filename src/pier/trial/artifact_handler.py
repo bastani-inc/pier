@@ -12,14 +12,20 @@ from pier.models.trial.artifact_manifest import (
 from pier.models.trial.config import ArtifactConfig
 
 
+MODEL_PATCH_FILENAME = "model.patch"
+
+
 class MissingArtifactError(RuntimeError):
-    """A declared artifact was not collected, or was collected empty.
+    """A declared artifact was not collected, or a patch was collected empty.
 
     Artifact download is best-effort by design, and the manifest has always
     recorded per-entry ``status``. Nothing read it, so a trial whose task
     declared ``/logs/artifacts/model.patch`` and produced nothing still finished
     as an ordinary completed trial. Raising this into ``TrialResult`` is what
     makes such a trial count as errored.
+
+    See :func:`failed_artifact_entries` for exactly which manifest entries reach
+    here; emptiness is fatal for ``model.patch`` only.
     """
 
     def __init__(self, entries: Sequence[ArtifactManifestEntry]) -> None:
@@ -28,20 +34,40 @@ class MissingArtifactError(RuntimeError):
         super().__init__(f"Declared artifact(s) missing or empty after collection: {rendered}")
 
 
+def _is_model_patch(entry: ArtifactManifestEntry) -> bool:
+    """True when an entry names ``model.patch`` on either side.
+
+    ``source`` is the declared container path; ``destination`` is where it
+    landed. Matching either covers a task that declares
+    ``ArtifactConfig(source="/app/out.diff", destination="model.patch")``.
+    """
+    return MODEL_PATCH_FILENAME in (
+        PurePosixPath(entry.source).name,
+        PurePosixPath(entry.destination).name,
+    )
+
+
 def failed_artifact_entries(
     manifest: ArtifactManifest,
 ) -> tuple[ArtifactManifestEntry, ...]:
     """Return the manifest entries that mean an artifact did not arrive.
 
-    A ``failed`` entry of any type counts. An ``empty`` entry counts only for a
-    *file*: an empty artifacts *directory* is the ordinary shape of a task that
-    declares no artifacts, while an empty declared file is a file that carried
-    nothing.
+    A ``failed`` entry of any type counts: the download was attempted and did
+    not produce the file.
+
+    An ``empty`` entry counts only for a ``model.patch`` **file**. An empty
+    patch carries no more than an absent one, which is the failure the harness
+    must report. Every other empty artifact stays informational: a task may
+    legitimately declare a log or report that a given run leaves empty, and
+    erroring the trial for that would invent a rule no task asked for. An empty
+    artifacts *directory* likewise stays tolerated — it is the ordinary shape of
+    a task that declares no artifacts.
     """
     return tuple(
         entry
         for entry in manifest.entries
-        if entry.status == "failed" or (entry.status == "empty" and entry.type == "file")
+        if entry.status == "failed"
+        or (entry.status == "empty" and entry.type == "file" and _is_model_patch(entry))
     )
 
 

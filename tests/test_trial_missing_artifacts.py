@@ -10,7 +10,7 @@ completed trial with no error recorded. ``exception_info`` is the only field
 import asyncio
 import functools
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest.mock import AsyncMock
 
 import pytest
@@ -22,6 +22,7 @@ from pier.models.trial.result import ExceptionInfo, StepResult, TrialResult
 from pier.trial.artifact_handler import (
     ArtifactHandler,
     MissingArtifactError,
+    _is_model_patch,
     failed_artifact_entries,
 )
 from pier.trial.trial import Trial
@@ -37,9 +38,20 @@ def run_async(fn):
     return wrapper
 
 
-def _entry(status: str, *, type: str = "file", source: str = "/logs/artifacts/model.patch"):
+def _entry(
+    status: str,
+    *,
+    type: str = "file",
+    source: str = "/logs/artifacts/model.patch",
+    destination: str | None = None,
+):
+    # Derive the destination from the source unless a test overrides it, so a
+    # fixture cannot accidentally look like model.patch on the other side.
     return ArtifactManifestEntry(
-        source=source, destination="artifacts/model.patch", type=type, status=status
+        source=source,
+        destination=destination or f"artifacts/{PurePosixPath(source).name}",
+        type=type,
+        status=status,
     )
 
 
@@ -73,10 +85,64 @@ def test_a_failed_entry_counts():
     assert failed_artifact_entries(manifest) == tuple(manifest.entries)
 
 
-def test_an_empty_file_entry_counts():
+def test_an_empty_model_patch_entry_counts():
     manifest = ArtifactManifest(entries=[_entry("empty")])
 
     assert len(failed_artifact_entries(manifest)) == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["/logs/artifacts/success.log", "/logs/artifacts/optional.txt", "/logs/report.json"],
+)
+def test_an_empty_non_patch_file_does_not_count(source: str):
+    """Emptiness is fatal for model.patch only.
+
+    A task may legitimately declare a log or report that a given run leaves
+    empty; erroring the trial for that invents a rule no task asked for. The
+    manifest still records the entry as ``empty``, so the fact is not lost.
+    """
+    manifest = ArtifactManifest(entries=[_entry("empty", source=source)])
+
+    assert failed_artifact_entries(manifest) == ()
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["/logs/artifacts/success.log", "/logs/report.json"],
+)
+def test_a_failed_non_patch_file_still_counts(source: str):
+    """A download that failed is a failure whatever it was fetching."""
+    manifest = ArtifactManifest(entries=[_entry("failed", source=source)])
+
+    assert len(failed_artifact_entries(manifest)) == 1
+
+
+def test_an_empty_patch_counts_when_only_the_destination_names_it():
+    """`ArtifactConfig(source="/app/out.diff", destination="model.patch")`."""
+    manifest = ArtifactManifest(
+        entries=[_entry("empty", source="/app/out.diff", destination="artifacts/model.patch")]
+    )
+
+    assert len(failed_artifact_entries(manifest)) == 1
+
+
+@pytest.mark.parametrize(
+    ("source", "destination", "expected"),
+    [
+        ("/logs/artifacts/model.patch", "artifacts/model.patch", True),
+        ("/app/out.diff", "artifacts/model.patch", True),
+        ("/logs/artifacts/model.patch", "artifacts/renamed.diff", True),
+        ("/logs/artifacts/success.log", "artifacts/success.log", False),
+        ("/logs/artifacts/model.patch.bak", "artifacts/model.patch.bak", False),
+    ],
+)
+def test_model_patch_matching(source: str, destination: str, expected: bool):
+    entry = ArtifactManifestEntry(
+        source=source, destination=destination, type="file", status="empty"
+    )
+
+    assert _is_model_patch(entry) is expected
 
 
 def test_an_empty_directory_entry_does_not_count():
