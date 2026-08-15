@@ -546,7 +546,14 @@ class TaskConfig(BaseModel):
             self.environment.allow_internet = agent_mode == NetworkMode.PUBLIC
 
         def _resolve_verifier(verifier: VerifierConfig) -> None:
-            mode = verifier.network_mode or task_mode
+            # A nested [verifier.environment].network_mode is a mode source too:
+            # without it a separate verifier environment kept allow_internet=True
+            # while carrying network_mode='no-network', a self-contradicting
+            # object that ran with full egress.
+            nested_mode = (
+                verifier.environment.network_mode if verifier.environment is not None else None
+            )
+            mode = verifier.network_mode or nested_mode or task_mode
             if mode is None:
                 return
             if (
@@ -561,19 +568,23 @@ class TaskConfig(BaseModel):
             if verifier.environment is not None:
                 verifier.environment.network_mode = mode
                 verifier.environment.allow_internet = mode == NetworkMode.PUBLIC
-            elif (
-                verifier.network_mode is not None
-                and agent_mode is not None
-                and verifier.network_mode != agent_mode
-            ):
-                # Shared-environment verifier: it runs in the agent's container,
-                # so a conflicting explicit override cannot be enforced.
-                raise ValueError(
-                    "[verifier].network_mode conflicts with the agent "
-                    "environment's resolved network policy but the verifier "
-                    "shares that environment; use environment_mode='separate' "
-                    "to give the verifier its own network policy."
-                )
+            elif verifier.network_mode is not None and agent_mode is not None:
+                if verifier.network_mode != agent_mode:
+                    # Shared-environment verifier: it runs in the agent's
+                    # container, so a conflicting explicit override cannot be
+                    # enforced.
+                    raise ValueError(
+                        "[verifier].network_mode conflicts with the agent "
+                        "environment's resolved network policy but the verifier "
+                        "shares that environment; use environment_mode='separate' "
+                        "to give the verifier its own network policy."
+                    )
+            elif verifier.network_mode is not None:
+                # Shared environment and nothing else asked for a policy: there
+                # is no conflict to raise, so honor the verifier's own mode
+                # rather than leaving the shared environment public.
+                self.environment.network_mode = verifier.network_mode
+                self.environment.allow_internet = verifier.network_mode == NetworkMode.PUBLIC
 
         _resolve_verifier(self.verifier)
         for step in self.steps or []:

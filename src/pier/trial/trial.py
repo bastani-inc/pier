@@ -930,15 +930,22 @@ class Trial:
         ``JobStats.increment`` treats as an error, so record it there — and only
         when it is still unset, because this runs on the cancel and outer-except
         paths too, where clobbering would lose the real cause.
+
+        A step-level miss is recorded on the step **and promoted to the trial**.
+        ``JobStats`` never reads ``StepResult.exception_info``, so a multi-step
+        trial that lost its patch would otherwise still count as completed with
+        zero errors — the same defect this method exists to fix, one nesting
+        level down.
         """
         offenders = failed_artifact_entries(manifest)
         if not offenders:
             return
         error = MissingArtifactError(offenders)
         self._logger.error(str(error))
-        target = step_result if step_result is not None else self.result
-        if target.exception_info is None:
-            target.exception_info = ExceptionInfo.from_exception(error)
+        if step_result is not None and step_result.exception_info is None:
+            step_result.exception_info = ExceptionInfo.from_exception(error)
+        if self.result.exception_info is None:
+            self.result.exception_info = ExceptionInfo.from_exception(error)
 
     async def _collect_artifacts(self) -> None:
         """Collect trial-level artifacts into ``trial_dir/artifacts/``.

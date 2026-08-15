@@ -137,3 +137,100 @@ def test_allowed_hosts_rejected():
 def test_unknown_network_mode_rejected():
     with pytest.raises(ValidationError):
         TaskConfig.model_validate_toml("[agent]\nnetwork_mode = \"offline\"\n")
+
+
+def test_separate_verifier_environment_honors_its_own_nested_mode():
+    """A nested [verifier.environment].network_mode must reach allow_internet.
+
+    It used to be ignored: the object carried network_mode='no-network' while
+    allow_internet stayed True, so the verifier ran with full egress.
+    """
+    cfg = TaskConfig.model_validate_toml(
+        """
+[verifier]
+environment_mode = "separate"
+
+[verifier.environment]
+network_mode = "no-network"
+docker_image = "example/verifier:tag"
+
+[environment]
+docker_image = "example/image:tag"
+"""
+    )
+
+    assert cfg.verifier.environment is not None
+    assert cfg.verifier.environment.network_mode is NetworkMode.NO_NETWORK
+    assert cfg.verifier.environment.allow_internet is False
+
+
+def test_shared_verifier_mode_applies_when_nothing_else_asked_for_one():
+    """No conflict to raise, so the shared environment takes the verifier's mode."""
+    cfg = TaskConfig.model_validate_toml(
+        """
+[verifier]
+network_mode = "no-network"
+
+[environment]
+docker_image = "example/image:tag"
+"""
+    )
+
+    assert cfg.environment.network_mode is NetworkMode.NO_NETWORK
+    assert cfg.environment.allow_internet is False
+
+
+def test_a_genuine_shared_environment_conflict_still_raises():
+    with pytest.raises(ValidationError) as excinfo:
+        TaskConfig.model_validate_toml(
+            """
+[verifier]
+network_mode = "no-network"
+
+[agent]
+network_mode = "public"
+
+[environment]
+docker_image = "example/image:tag"
+"""
+        )
+
+    assert "shares that environment" in str(excinfo.value)
+
+
+def test_a_shared_verifier_agreeing_with_the_agent_is_accepted():
+    cfg = TaskConfig.model_validate_toml(
+        """
+[verifier]
+network_mode = "no-network"
+
+[agent]
+network_mode = "no-network"
+
+[environment]
+docker_image = "example/image:tag"
+"""
+    )
+
+    assert cfg.environment.allow_internet is False
+
+
+def test_a_nested_verifier_environment_can_still_ask_for_public():
+    cfg = TaskConfig.model_validate_toml(
+        """
+[verifier]
+environment_mode = "separate"
+
+[verifier.environment]
+network_mode = "public"
+docker_image = "example/verifier:tag"
+
+[environment]
+network_mode = "no-network"
+docker_image = "example/image:tag"
+"""
+    )
+
+    assert cfg.environment.allow_internet is False
+    assert cfg.verifier.environment is not None
+    assert cfg.verifier.environment.allow_internet is True

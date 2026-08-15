@@ -254,7 +254,12 @@ def test_an_in_flight_exception_is_never_clobbered():
     assert result.exception_info.exception_message == "the real cause"
 
 
-def test_a_step_result_is_recorded_when_given():
+def test_a_step_result_is_recorded_and_promoted_to_the_trial():
+    """JobStats never reads StepResult.exception_info.
+
+    A multi-step trial that lost its patch would otherwise count as completed
+    with zero errors — the same defect one nesting level down.
+    """
     result = _trial_result()
     step_result = StepResult(step_name="only")
 
@@ -264,7 +269,47 @@ def test_a_step_result_is_recorded_when_given():
 
     assert step_result.exception_info is not None
     assert step_result.exception_info.exception_type == "MissingArtifactError"
-    assert result.exception_info is None
+    assert result.exception_info is not None
+    assert result.exception_info.exception_type == "MissingArtifactError"
+
+
+def test_a_step_level_miss_does_not_clobber_an_in_flight_trial_exception():
+    result = _trial_result()
+    result.exception_info = ExceptionInfo.from_exception(RuntimeError("the real cause"))
+    step_result = StepResult(step_name="only")
+
+    Trial._record_missing_artifacts(
+        _StubTrial(result), ArtifactManifest(entries=[_entry("failed")]), step_result=step_result
+    )
+
+    assert step_result.exception_info is not None
+    assert result.exception_info.exception_type == "RuntimeError"
+
+
+def test_a_step_level_miss_is_counted_as_an_errored_trial():
+    from pier.models.job.result import JobStats
+    from pier.models.trial.result import AgentInfo
+
+    result = TrialResult.model_construct(
+        trial_name="t",
+        task_name="task",
+        source=None,
+        verifier_result=None,
+        exception_info=None,
+        step_results=[],
+        agent_info=AgentInfo(name="atomic", version="0.9.3", model_info=None),
+    )
+    step_result = StepResult(step_name="only")
+
+    Trial._record_missing_artifacts(
+        _StubTrial(result), ArtifactManifest(entries=[_entry("failed")]), step_result=step_result
+    )
+
+    stats = JobStats()
+    stats.increment(result)
+
+    assert stats.n_errored_trials == 1
+    assert "MissingArtifactError" in stats.evals[next(iter(stats.evals))].exception_stats
 
 
 def test_the_recorded_exception_is_what_job_stats_counts():
