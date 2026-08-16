@@ -109,13 +109,19 @@ def test_an_empty_non_patch_file_does_not_count(source: str):
 
 @pytest.mark.parametrize(
     "source",
-    ["/logs/artifacts/success.log", "/logs/report.json"],
+    ["/logs/artifacts/success.log", "/logs/artifacts/optional.log", "/logs/report.json"],
 )
-def test_a_failed_non_patch_file_still_counts(source: str):
-    """A download that failed is a failure whatever it was fetching."""
+def test_a_failed_non_patch_file_does_not_count(source: str):
+    """Artifact download stays best-effort for everything but the patch.
+
+    Erroring a trial because an unrelated declared log failed to download
+    widens pier beyond the contract this module exists to enforce, and would
+    reject runs on other datasets that pier permits today. The manifest still
+    records the entry as ``failed``, so the fact is not lost.
+    """
     manifest = ArtifactManifest(entries=[_entry("failed", source=source)])
 
-    assert len(failed_artifact_entries(manifest)) == 1
+    assert failed_artifact_entries(manifest) == ()
 
 
 def test_an_empty_patch_counts_when_only_the_destination_names_it():

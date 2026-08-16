@@ -16,7 +16,7 @@ MODEL_PATCH_FILENAME = "model.patch"
 
 
 class MissingArtifactError(RuntimeError):
-    """A declared artifact was not collected, or a patch was collected empty.
+    """A trial's ``model.patch`` was not collected, or was collected empty.
 
     Artifact download is best-effort by design, and the manifest has always
     recorded per-entry ``status``. Nothing read it, so a trial whose task
@@ -25,7 +25,8 @@ class MissingArtifactError(RuntimeError):
     makes such a trial count as errored.
 
     See :func:`failed_artifact_entries` for exactly which manifest entries reach
-    here; emptiness is fatal for ``model.patch`` only.
+    here: ``model.patch`` only, whether missing or empty. Every other artifact
+    remains best-effort.
     """
 
     def __init__(self, entries: Sequence[ArtifactManifestEntry]) -> None:
@@ -50,24 +51,25 @@ def _is_model_patch(entry: ArtifactManifestEntry) -> bool:
 def failed_artifact_entries(
     manifest: ArtifactManifest,
 ) -> tuple[ArtifactManifestEntry, ...]:
-    """Return the manifest entries that mean an artifact did not arrive.
+    """Return the manifest entries that mean the trial lost its patch.
 
-    A ``failed`` entry of any type counts: the download was attempted and did
-    not produce the file.
+    Only ``model.patch`` **files** count, and both ``failed`` and ``empty``
+    count for them: an empty patch carries no more than an absent one, and
+    either way the trial produced no solution to grade.
 
-    An ``empty`` entry counts only for a ``model.patch`` **file**. An empty
-    patch carries no more than an absent one, which is the failure the harness
-    must report. Every other empty artifact stays informational: a task may
-    legitimately declare a log or report that a given run leaves empty, and
-    erroring the trial for that would invent a rule no task asked for. An empty
-    artifacts *directory* likewise stays tolerated — it is the ordinary shape of
-    a task that declares no artifacts.
+    Every other artifact stays best-effort, which is what artifact download has
+    always been. A task may legitimately declare a log or report that a given
+    run leaves empty or that the environment never wrote, and erroring the trial
+    for that would invent a rule no task asked for and reject runs on other
+    datasets that pier permits today. Those failures stay in the manifest and in
+    the debug log, where they were.
     """
     return tuple(
         entry
         for entry in manifest.entries
-        if entry.status == "failed"
-        or (entry.status == "empty" and entry.type == "file" and _is_model_patch(entry))
+        if entry.type == "file"
+        and entry.status in ("failed", "empty")
+        and _is_model_patch(entry)
     )
 
 
