@@ -42,14 +42,25 @@ class NetworkMode(str, Enum):
     ALLOWLIST = "allowlist"
 
 
-class NetworkPolicyFieldsMixin(BaseModel):
+class StrictTaskModel(BaseModel):
+    """Base for every ``task.toml`` model: unknown keys are a parse error.
+
+    A key pier cannot model is a task asking for behavior pier will not deliver.
+    Dropping it silently is how a task can declare one thing and have another
+    run - `network_mode` was ignored that way. Pydantic merges this into every
+    subclass, so it is declared once here rather than per model.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class NetworkPolicyFieldsMixin(StrictTaskModel):
     """``network_mode`` field shared by the [environment] scope and the
     [agent]/[verifier] phase overrides (Harbor's PhaseNetworkPolicyConfig
     equivalent). Pier currently enforces 'no-network' and 'public' only;
     'allowlist' (and its 'allowed_hosts' companion) is rejected at parse time
     rather than silently mis-enforced."""
 
-    model_config = ConfigDict(extra="forbid")
 
     network_mode: NetworkMode | None = Field(
         default=None,
@@ -76,22 +87,20 @@ class NetworkPolicyFieldsMixin(BaseModel):
         return self
 
 
-class Author(BaseModel):
+class Author(StrictTaskModel):
     """Author information for a package or dataset."""
 
-    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., description="Author name")
     email: str | None = Field(default=None, description="Author email address")
 
 
-class PackageInfo(BaseModel):
+class PackageInfo(StrictTaskModel):
     """Package metadata for the [task] section of task.toml.
 
     This section identifies the package in the registry with a unique name.
     """
 
-    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(
         ...,
@@ -150,7 +159,7 @@ def _validate_compose_service_name(value: str | None) -> str | None:
     return value
 
 
-class VerifierCollectConfig(BaseModel):
+class VerifierCollectConfig(StrictTaskModel):
     """A command run inside a compose service after the agent phase ends.
 
     Collect hooks let tasks snapshot runtime state into files before the
@@ -161,7 +170,6 @@ class VerifierCollectConfig(BaseModel):
     compose sidecar services are skipped with a warning.
     """
 
-    model_config = ConfigDict(extra="forbid")
 
     command: str = Field(..., description="Shell command to run in the service.")
     service: str = Field(
@@ -189,7 +197,6 @@ class VerifierCollectConfig(BaseModel):
 
 
 class VerifierConfig(NetworkPolicyFieldsMixin):
-    model_config = ConfigDict(extra="forbid")
 
     timeout_sec: float = 600.0
     env: dict[str, str] = Field(default_factory=dict)
@@ -241,14 +248,12 @@ class VerifierConfig(NetworkPolicyFieldsMixin):
         return self
 
 
-class SolutionConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class SolutionConfig(StrictTaskModel):
 
     env: dict[str, str] = Field(default_factory=dict)
 
 
 class AgentConfig(NetworkPolicyFieldsMixin):
-    model_config = ConfigDict(extra="forbid")
 
     timeout_sec: float | None = None
     user: str | int | None = Field(
@@ -257,14 +262,13 @@ class AgentConfig(NetworkPolicyFieldsMixin):
     )
 
 
-class HealthcheckConfig(BaseModel):
+class HealthcheckConfig(StrictTaskModel):
     """Healthcheck configuration mirroring Docker HEALTHCHECK options.
 
     Runs a command repeatedly after environment start to verify readiness.
     All retries must pass before agent setup begins.
     """
 
-    model_config = ConfigDict(extra="forbid")
 
     command: str = Field(..., description="Shell command to run. Exit 0 means healthy.")
     interval_sec: float = Field(
@@ -291,7 +295,6 @@ class HealthcheckConfig(BaseModel):
 
 
 class EnvironmentConfig(NetworkPolicyFieldsMixin):
-    model_config = ConfigDict(extra="forbid")
 
     build_timeout_sec: float = 600.0  # 10 minutes default
     docker_image: str | None = None
@@ -420,10 +423,9 @@ class EnvironmentConfig(NetworkPolicyFieldsMixin):
         return data
 
 
-class MCPServerConfig(BaseModel):
+class MCPServerConfig(StrictTaskModel):
     """Configuration for an MCP server available to the agent."""
 
-    model_config = ConfigDict(extra="forbid")
 
     name: str
     transport: str = "sse"  # "sse" | "streamable-http" | "stdio"
@@ -440,8 +442,7 @@ class MCPServerConfig(BaseModel):
         return self
 
 
-class ArtifactConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class ArtifactConfig(StrictTaskModel):
 
     source: str
     destination: str | None = None
@@ -452,8 +453,7 @@ class ArtifactConfig(BaseModel):
     )
 
 
-class StepConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class StepConfig(StrictTaskModel):
 
     name: str
     agent: AgentConfig = Field(default_factory=AgentConfig)
@@ -490,8 +490,7 @@ class MultiStepRewardStrategy(str, Enum):
     FINAL = "final"
 
 
-class TaskConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class TaskConfig(StrictTaskModel):
 
     schema_version: str = "1.2"
     task: PackageInfo | None = Field(

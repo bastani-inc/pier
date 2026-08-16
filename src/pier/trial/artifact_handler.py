@@ -11,7 +11,6 @@ from pier.models.trial.artifact_manifest import (
 )
 from pier.models.trial.config import ArtifactConfig
 
-
 MODEL_PATCH_FILENAME = "model.patch"
 
 

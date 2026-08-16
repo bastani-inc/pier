@@ -22,13 +22,13 @@ from pier.environments.base import HealthcheckError
 from pier.environments.factory import EnvironmentFactory
 from pier.models.agent.context import AgentContext
 from pier.models.task.config import (
-    EnvironmentConfig as TaskEnvironmentConfig,
-)
-from pier.models.task.config import (
     MAIN_SERVICE_NAME,
     MultiStepRewardStrategy,
     StepConfig,
     VerifierEnvironmentMode,
+)
+from pier.models.task.config import (
+    EnvironmentConfig as TaskEnvironmentConfig,
 )
 from pier.models.task.task import Task
 from pier.models.task.verifier_mode import (
@@ -36,12 +36,12 @@ from pier.models.task.verifier_mode import (
     resolve_step_verifier_mode,
     resolve_task_verifier_mode,
 )
+from pier.models.trial.artifact_manifest import ArtifactManifest
 from pier.models.trial.config import (
     ArtifactConfig,
     ServiceVolumeConfig,
     TrialConfig,
 )
-from pier.models.trial.artifact_manifest import ArtifactManifest
 from pier.models.trial.paths import TrialPaths
 from pier.models.trial.result import (
     ExceptionInfo,
@@ -55,13 +55,13 @@ from pier.trial.artifact_handler import (
     MissingArtifactError,
     failed_artifact_entries,
 )
-from pier.trial.hooks import TrialEvent, TrialHookEvent
 from pier.trial.execution import (
     AgentSetupTimeoutError,
     AgentTimeoutError,
     EnvironmentStartTimeoutError,
     TrialExecution,
 )
+from pier.trial.hooks import TrialEvent, TrialHookEvent
 from pier.utils.logger import logger
 from pier.verifier.verifier import Verifier
 
